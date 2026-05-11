@@ -19,6 +19,7 @@ interface ListEntry {
   yuturaId: string;
   name: string;
   thumbnailUrl: string | null;
+  subscriberCount: number | null;
 }
 
 interface ResolvedChannel extends ListEntry {
@@ -155,6 +156,8 @@ const DETAIL_LINK_RE =
   /<a href="\/channel\/(\d+)\/">/;
 const YOUTUBE_ID_RE =
   /href="https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{20,})"/;
+const NUMBER_RE =
+  /(?<![A-Za-z0-9])\d{1,3}(?:,\d{3})+|\b\d{4,}\b/g;
 
 function stripTags(html: string): string {
   return html
@@ -165,6 +168,15 @@ function stripTags(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .trim();
+}
+
+function parseSubscriberCount(block: string): number | null {
+  const text = stripTags(block);
+  const values = [...text.matchAll(NUMBER_RE)]
+    .map((match) => Number.parseInt(match[0].replace(/,/g, ''), 10))
+    .filter((value) => Number.isFinite(value) && value >= 1_000);
+
+  return values.length > 0 ? Math.max(...values) : null;
 }
 
 function parseListPage(html: string): ListEntry[] {
@@ -187,6 +199,7 @@ function parseListPage(html: string): ListEntry[] {
       yuturaId,
       name: stripTags(titleHtml),
       thumbnailUrl: thumbMatch?.[1] ?? null,
+      subscriberCount: parseSubscriberCount(block),
     });
   }
   return entries;
@@ -207,6 +220,16 @@ async function fetchListPage(page: number): Promise<ListEntry[]> {
   return entries;
 }
 
+async function fetchMonthlyListPage(page: number, month: string): Promise<ListEntry[]> {
+  const url = `${BASE_URL}/ranking/?p=${page}&mode=subscriber&date=${month}`;
+  const html = await fetchHtml(url);
+  const entries = parseListPage(html);
+  if (entries.length === 0) {
+    throw new Error(`yutura_monthly_empty_page month=${month} page=${page}`);
+  }
+  return entries;
+}
+
 async function resolveYoutubeChannelId(yuturaId: string): Promise<string | null> {
   const url = `${BASE_URL}/channel/${yuturaId}/`;
   const html = await fetchHtml(url, `${BASE_URL}/ranking/`);
@@ -218,6 +241,101 @@ function lookupCachedYoutubeId(yuturaId: string): string | null {
     .prepare('SELECT id FROM channels WHERE source_id = ?')
     .get(yuturaId) as { id: string } | undefined;
   return row?.id ?? null;
+}
+
+function monthSnapshotTimestamp(month: string): string {
+  if (!/^\d{6}$/.test(month)) {
+    throw new Error(`invalid_month month=${month}`);
+  }
+  const year = month.slice(0, 4);
+  const mm = month.slice(4, 6);
+  return `${year}-${mm}-01T00:00:00.000Z`;
+}
+
+export async function backfillYuturaMonthlySnapshots(month: string): Promise<void> {
+  const startedAt = new Date().toISOString();
+  const polledAt = monthSnapshotTimestamp(month);
+  try {
+    const listEntries: ListEntry[] = [];
+    for (let page = 1; page <= PAGE_COUNT; page++) {
+      const entries = await fetchMonthlyListPage(page, month);
+      listEntries.push(...entries);
+      console.log(
+        `[worker] yutura_monthly_page=${page} month=${month} entries=${entries.length} total=${listEntries.length}`,
+      );
+      if (page < PAGE_COUNT) await sleep(env.YUTURA_REQUEST_DELAY_MS);
+    }
+
+    const seen = new Set<string>();
+    const targets = listEntries
+      .filter((entry) => {
+        if (seen.has(entry.yuturaId)) return false;
+        seen.add(entry.yuturaId);
+        return entry.subscriberCount != null;
+      })
+      .slice(0, env.BACKGROUND_LIMIT);
+
+    const insertSnapshot = db.prepare(`
+      INSERT OR REPLACE INTO subscriber_snapshots
+        (channel_id, polled_at, subscriber_count, video_count, view_count)
+      VALUES (?, ?, ?, NULL, NULL)
+    `);
+
+    const write = db.transaction((rows: Array<{ id: string; count: number }>) => {
+      for (const row of rows) {
+        insertSnapshot.run(row.id, polledAt, row.count);
+      }
+    });
+
+    const snapshots: Array<{ id: string; count: number }> = [];
+    let cacheHits = 0;
+    let detailFetches = 0;
+    let detailFailures = 0;
+    let missingCounts = 0;
+
+    for (const entry of targets) {
+      if (entry.subscriberCount == null) {
+        missingCounts++;
+        continue;
+      }
+
+      const cached = lookupCachedYoutubeId(entry.yuturaId);
+      if (cached) {
+        snapshots.push({ id: cached, count: entry.subscriberCount });
+        cacheHits++;
+        continue;
+      }
+
+      try {
+        const ytId = await resolveYoutubeChannelId(entry.yuturaId);
+        detailFetches++;
+        if (ytId) {
+          snapshots.push({ id: ytId, count: entry.subscriberCount });
+        } else {
+          detailFailures++;
+          console.log(
+            `[worker] yutura_monthly_no_youtube_id month=${month} yutura_id=${entry.yuturaId} name="${entry.name}"`,
+          );
+        }
+      } catch (err) {
+        detailFailures++;
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`[worker] yutura_monthly_detail_error month=${month} yutura_id=${entry.yuturaId} reason=${message}`);
+      }
+      await sleep(env.YUTURA_REQUEST_DELAY_MS);
+    }
+
+    write(snapshots);
+
+    const durationMs = Date.now() - new Date(startedAt).getTime();
+    console.log(
+      `[worker] yutura_monthly_backfill_success month=${month} polled_at=${polledAt} ` +
+        `snapshots=${snapshots.length} cache_hits=${cacheHits} detail_fetches=${detailFetches} ` +
+        `detail_failures=${detailFailures} missing_counts=${missingCounts} duration_ms=${durationMs}`,
+    );
+  } finally {
+    await destroyFlaresolverrSession();
+  }
 }
 
 export async function pollYutura(): Promise<void> {
