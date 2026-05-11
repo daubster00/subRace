@@ -21,7 +21,7 @@ const FIELDS: FieldDef[] = [
     ] },
   { key: 'BACKGROUND_LIMIT', label: 'バックグラウンド収集数', type: 'number', min: 1, step: 1 },
   { key: 'YUTURA_INTERVAL_HOURS', label: 'yutura ポーリング (時間)', type: 'number', min: 1, step: 1 },
-  { key: 'YUTURA_REQUEST_DELAY_MS', label: 'yutura リクエスト間隔 (ms)', type: 'number', min: 0, step: 100 },
+  { key: 'YOUTUBE_POLL_INTERVAL_HOURS', label: 'YouTube ポーリング (時間)', type: 'number', min: 1, step: 1, hint: 'YouTube API ポーリング周期。デフォルトは 6 時間です。' },
   { key: 'TIMEZONE', label: 'タイムゾーン', type: 'text' },
 ];
 
