@@ -182,9 +182,16 @@ export function useInterpolatedSnapshot(
       data.channels.map((ch) => [ch.id, ch.subscriberCount])
     );
     const incomingPreviousCounts = new Map(
-      data.channels
-        .filter((ch) => ch.previousSubscriberCount != null && ch.previousSubscriberCount > 0)
-        .map((ch) => [ch.id, ch.previousSubscriberCount as number])
+      data.channels.map((ch) => {
+        const rate = ch.growthRatePerHour;
+        const trendPrevious = rate != null
+          ? Math.max(1, Math.round(ch.subscriberCount - rate * pollIntervalHours))
+          : null;
+        const fallbackPrevious = ch.previousSubscriberCount != null && ch.previousSubscriberCount > 0
+          ? ch.previousSubscriberCount
+          : null;
+        return [ch.id, trendPrevious ?? fallbackPrevious] as const;
+      }).filter((entry): entry is readonly [string, number] => entry[1] != null)
     );
 
     let countsChanged = currCountsRef.current.size === 0;
@@ -203,15 +210,13 @@ export function useInterpolatedSnapshot(
         correctionStartCountsRef.current = new Map(displayCountsRef.current);
         correctionStartAtRef.current = Date.now();
       }
-      prevCountsRef.current = currCountsRef.current.size > 0
-        ? new Map(currCountsRef.current)
-        : incomingPreviousCounts;
+      prevCountsRef.current = incomingPreviousCounts;
       currCountsRef.current = incomingCounts;
       snapshotArrivedAtRef.current = getSnapshotTime(data.channels);
     }
 
     latestChannelsRef.current = data.channels;
-  }, [data]);
+  }, [data, pollIntervalHours]);
 
   useEffect(() => {
     if (!data) return;

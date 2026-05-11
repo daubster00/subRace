@@ -20,8 +20,13 @@ const ChannelSchema = z.object({
   viewCount:       z.number().int().nullable(),
   snapshottedAt:   z.string(),
   rank:            z.number().int().positive(),
-  // Surge metrics over a rolling 24h window — null when the channel does
-  // not yet have a snapshot at least 24h old. Rate is a fraction (0.025 = +2.5%).
+  // Trend baseline: prefer a snapshot at least ~1 month old; if unavailable,
+  // use the oldest available snapshot before the current one.
+  trendBaselineSubscriberCount: z.number().int().nullable(),
+  trendBaselineAt: z.string().nullable(),
+  trendDelta:      z.number().int().nullable(),
+  growthRatePerHour: z.number().nullable(),
+  // Surge metrics use the configurable window, currently 24h in production.
   surgeDelta24h:   z.number().int().nullable(),
   surgeRate24h:    z.number().nullable(),
 });
@@ -56,6 +61,8 @@ interface ChannelRow {
   thumbnail_url:    string | null;
   subscriber_count: number;
   previous_subscriber_count: number | null;
+  trend_baseline_count: number | null;
+  trend_baseline_at: string | null;
   surge_baseline_count: number | null;
   video_count:      number | null;
   view_count:       number | null;
@@ -99,6 +106,46 @@ export function readSnapshot(): SnapshotResponse {
         ORDER  BY ss_prev.polled_at DESC
         LIMIT  1
       ) AS previous_subscriber_count,
+      COALESCE(
+        (
+          SELECT ss_month.subscriber_count
+          FROM   subscriber_snapshots ss_month
+          WHERE  ss_month.channel_id = c.id
+            AND  s.polled_at IS NOT NULL
+            AND  julianday(s.polled_at) - julianday(ss_month.polled_at) >= 30.0
+          ORDER  BY ss_month.polled_at DESC
+          LIMIT  1
+        ),
+        (
+          SELECT ss_old.subscriber_count
+          FROM   subscriber_snapshots ss_old
+          WHERE  ss_old.channel_id = c.id
+            AND  s.polled_at IS NOT NULL
+            AND  ss_old.polled_at < s.polled_at
+          ORDER  BY ss_old.polled_at ASC
+          LIMIT  1
+        )
+      ) AS trend_baseline_count,
+      COALESCE(
+        (
+          SELECT ss_month.polled_at
+          FROM   subscriber_snapshots ss_month
+          WHERE  ss_month.channel_id = c.id
+            AND  s.polled_at IS NOT NULL
+            AND  julianday(s.polled_at) - julianday(ss_month.polled_at) >= 30.0
+          ORDER  BY ss_month.polled_at DESC
+          LIMIT  1
+        ),
+        (
+          SELECT ss_old.polled_at
+          FROM   subscriber_snapshots ss_old
+          WHERE  ss_old.channel_id = c.id
+            AND  s.polled_at IS NOT NULL
+            AND  ss_old.polled_at < s.polled_at
+          ORDER  BY ss_old.polled_at ASC
+          LIMIT  1
+        )
+      ) AS trend_baseline_at,
       (
         SELECT ss_24h.subscriber_count
         FROM   subscriber_snapshots ss_24h
@@ -132,6 +179,18 @@ export function readSnapshot(): SnapshotResponse {
     const surgeRate = baseline != null && baseline > 0
       ? (row.subscriber_count - baseline) / baseline
       : null;
+    const trendBaseline = row.trend_baseline_count;
+    const trendBaselineAt = row.trend_baseline_at;
+    const trendHours =
+      trendBaseline != null && trendBaselineAt && row.polled_at
+        ? (new Date(row.polled_at).getTime() - new Date(trendBaselineAt).getTime()) / 3_600_000
+        : null;
+    const trendDelta = trendBaseline != null && trendHours != null && trendHours > 0
+      ? row.subscriber_count - trendBaseline
+      : null;
+    const growthRatePerHour = trendDelta != null && trendHours != null && trendHours > 0
+      ? trendDelta / trendHours
+      : null;
 
     return {
       id:              row.id,
@@ -144,6 +203,10 @@ export function readSnapshot(): SnapshotResponse {
       viewCount:       row.view_count ?? null,
       snapshottedAt:   row.polled_at ?? new Date().toISOString(),
       rank:            i + 1,
+      trendBaselineSubscriberCount: trendBaseline ?? null,
+      trendBaselineAt: trendBaselineAt ?? null,
+      trendDelta,
+      growthRatePerHour,
       surgeDelta24h:   surgeDelta,
       surgeRate24h:    surgeRate,
     };

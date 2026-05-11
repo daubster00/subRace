@@ -95,20 +95,12 @@ function PageCyclePanel({
 }
 
 function RisingChannelsPanel({ channels }: Pick<BottomPanelsProps, 'channels'>) {
-  // Rank by 24h growth RATE (not absolute delta) so mid-sized channels gaining
-  // ground actually surface — otherwise the biggest subscriber bases always win.
-  // Display the absolute delta as the headline number since a "+5,432" feels
-  // more concrete to viewers than "+0.27%".
+  // Rank by long-window average velocity: prefer a roughly one-month baseline,
+  // falling back to the oldest available snapshot until enough history exists.
   const rising = channels
-    .filter((c) => c.surgeRate24h != null && c.surgeDelta24h != null && c.surgeDelta24h > 0)
-    .sort((a, b) => (b.surgeRate24h ?? 0) - (a.surgeRate24h ?? 0))
+    .filter((c) => c.growthRatePerHour != null && c.trendDelta != null && c.trendDelta > 0)
+    .sort((a, b) => (b.growthRatePerHour ?? 0) - (a.growthRatePerHour ?? 0))
     .slice(0, 5);
-
-  const rateFormatter = new Intl.NumberFormat('ja-JP', {
-    style: 'percent',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
 
   return (
     <article
@@ -138,7 +130,7 @@ function RisingChannelsPanel({ channels }: Pick<BottomPanelsProps, 'channels'>) 
           className="mt-[14px] flex h-[64px] items-center justify-center rounded-[8px] text-[12px] font-[750]"
           style={{ color: 'var(--color-muted)', background: 'rgba(255,255,255,0.04)', border: '1px dashed rgba(216,227,242,0.12)' }}
         >
-          24時間以上のデータが揃い次第表示します
+          履歴データが揃い次第表示します
         </div>
       ) : (
         <div className="mt-[12px] grid gap-[7px]" style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
@@ -159,7 +151,7 @@ function RisingChannelsPanel({ channels }: Pick<BottomPanelsProps, 'channels'>) 
                   No.{index + 1}
                 </span>
                 <span className="text-[12px] font-[900]" style={{ color: 'var(--color-increase)' }}>
-                  +{(channel.surgeDelta24h ?? 0).toLocaleString('ja-JP')}
+                  +{(channel.trendDelta ?? 0).toLocaleString('ja-JP')}
                 </span>
               </div>
               <div className="mt-[7px] flex min-w-0 items-center gap-[7px]">
@@ -190,7 +182,7 @@ function RisingChannelsPanel({ channels }: Pick<BottomPanelsProps, 'channels'>) 
                     {channel.name}
                   </p>
                   <p className="m-0 text-[10px] font-[750]" style={{ color: 'var(--color-increase)' }}>
-                    {rateFormatter.format(channel.surgeRate24h ?? 0)} / 24h
+                    +{Math.round((channel.growthRatePerHour ?? 0) * 24).toLocaleString('ja-JP')} / day
                   </p>
                 </div>
               </div>

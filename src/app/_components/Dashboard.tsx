@@ -102,7 +102,9 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
     const alertChannels: AlertChannel[] = data.channels.map((ch) => {
       const sPrev = prevPollCountsRef.current.get(ch.id) ?? ch.subscriberCount;
       const growthRatePerHour =
-        prevPollCountsRef.current.size > 0 && tIntervalHours > 0
+        ch.growthRatePerHour != null
+          ? ch.growthRatePerHour
+          : prevPollCountsRef.current.size > 0 && tIntervalHours > 0
           ? (ch.subscriberCount - sPrev) / tIntervalHours
           : 0;
       return {
