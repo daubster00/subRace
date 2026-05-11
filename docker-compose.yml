@@ -1,0 +1,67 @@
+# Isolated from the existing `infra-*` stack on this host.
+# - project name `subrace` namespaces all created resources
+# - container/network/volume names are explicitly prefixed `subrace`
+# - host port defaults to 3100 (3000 is taken by infra-web)
+name: subrace
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: subrace:latest
+    container_name: subrace-web
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      TZ: ${TIMEZONE:-Asia/Tokyo}
+    ports:
+      - "${SUBRACE_PORT:-3100}:3000"
+    volumes:
+      # Shared with the worker so fs.watch in runtime-settings.ts sees writes
+      # from either process — settings UI changes apply without a restart.
+      - subrace_data:/app/data
+    networks:
+      - subrace_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: subrace:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: subrace-worker
+    command: ["node_modules/.bin/tsx", "worker/index.ts"]
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      TZ: ${TIMEZONE:-Asia/Tokyo}
+      # curl-impersonate binary that mimics Chrome 131 TLS — bypasses
+      # Cloudflare's JA3/JA4 block on yutura.net.
+      YUTURA_CURL_BIN: curl_chrome131
+    volumes:
+      - subrace_data:/app/data
+    networks:
+      - subrace_net
+    restart: unless-stopped
+    # Web runs DB migrations first; worker waits for the health endpoint to
+    # avoid two processes racing on initial CREATE TABLE statements.
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  subrace_data:
+    name: subrace_data
+
+networks:
+  subrace_net:
+    name: subrace_net

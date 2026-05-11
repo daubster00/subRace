@@ -1,0 +1,125 @@
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;600;700;800&display=swap");
+@import "tailwindcss";
+
+@theme {
+  /* Color tokens */
+  --color-bg: #08111c;
+  --color-bg-deep: #050a12;
+  --color-surface: rgba(14, 28, 43, 0.76);
+  --color-surface-strong: rgba(18, 32, 49, 0.92);
+  --color-border: rgba(0, 178, 255, 0.18);
+  --color-border-strong: rgba(0, 178, 255, 0.34);
+  --color-primary: #00b2ff;
+  --color-primary-soft: rgba(0, 178, 255, 0.16);
+  --color-increase: #20e451;
+  --color-decrease: #ff3f46;
+  --color-alert: #ff3345;
+  --color-text: #ffffff;
+  --color-muted: #a7b3c7;
+  --color-soft: #d8e3f2;
+
+  /* Spacing / radius */
+  --radius-card: 8px;
+  --radius-panel: 8px;
+  --gap: 12px;
+  --page-padding: 20px;
+
+  /* Font */
+  --font-sans: "Noto Sans JP", system-ui, -apple-system, sans-serif;
+}
+
+@keyframes rcEnter {
+  from { transform: translateY(100%); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+@keyframes rcExit {
+  from { transform: translateY(0);    opacity: 1; }
+  to   { transform: translateY(-100%); opacity: 0; }
+}
+@keyframes digitWheel {
+  from { transform: translateY(0); }
+  to   { transform: translateY(var(--wheel-end)); }
+}
+@keyframes deltaHold {
+  from { transform: translateY(3px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+@keyframes countTraceHorizontal {
+  0% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  14% {
+    opacity: 1;
+  }
+  48% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+  78% {
+    opacity: 0.9;
+    transform: scaleX(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleX(1);
+  }
+}
+@keyframes countTraceVertical {
+  0% {
+    opacity: 0;
+    transform: scaleY(0);
+  }
+  14% {
+    opacity: 1;
+  }
+  48% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+  78% {
+    opacity: 0.9;
+    transform: scaleY(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleY(1);
+  }
+}
+@keyframes countCornerDraw {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 1;
+  }
+  20% {
+    opacity: 1;
+  }
+  68% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+  100% {
+    opacity: 0;
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes alertPurplePulse {
+  0%, 100% {
+    background: linear-gradient(180deg, rgba(78, 48, 148, 0.22), rgba(58, 32, 112, 0.18));
+  }
+  50% {
+    background: linear-gradient(180deg, rgba(78, 48, 148, 0.48), rgba(58, 32, 112, 0.42));
+  }
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(circle at 76% 20%, rgba(0, 178, 255, 0.12), transparent 26%),
+    radial-gradient(circle at 14% 18%, rgba(0, 178, 255, 0.11), transparent 28%),
+    linear-gradient(180deg, #07111d 0%, #050a12 100%);
+}
