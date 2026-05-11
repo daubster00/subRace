@@ -1,5 +1,6 @@
 import db from '@/lib/db';
 import { env } from '@/lib/env';
+import { createSingleFlight } from '@/lib/single-flight';
 import { pollYutura } from './yutura';
 import { pollYoutubeChannels } from './youtube-channels';
 import { startLivePoller } from './youtube-live';
@@ -46,24 +47,27 @@ export function startScheduler(): void {
   const yuturaIntervalMs = (): number => env.YUTURA_INTERVAL_HOURS * 60 * 60 * 1000;
   const ytIntervalMs = (): number => env.YOUTUBE_POLL_INTERVAL_HOURS * 60 * 60 * 1000;
 
-  if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void pollYutura();
+  // isDue() only inspects the last *finished* poll, so without single-flight
+  // locks a long-running poll (yutura resolve ~225s) would overlap with the
+  // next 60s tick and fan out duplicate upstream requests.
+  const runYutura = createSingleFlight(() => pollYutura());
+  const runYoutube = createSingleFlight(async () => {
+    await pollYoutubeChannels();
+    await pollYoutubeLikes();
+  });
+
+  if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void runYutura();
 
   const ytDue = isDue(getLastYoutubePacedAt(), ytIntervalMs()) || hasChannelsWithoutSnapshots();
   console.log(`[scheduler] yt_due=${ytDue} channels_without_snapshots=${hasChannelsWithoutSnapshots()}`);
-  if (ytDue) {
-    void pollYoutubeChannels();
-    void pollYoutubeLikes();
-  }
+  if (ytDue) void runYoutube();
 
-  setInterval(async () => {
-    if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) await pollYutura();
+  setInterval(() => {
+    if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void runYutura();
   }, 60_000);
 
-  setInterval(async () => {
-    if (isDue(getLastYoutubePacedAt(), ytIntervalMs())) {
-      await pollYoutubeChannels();
-      await pollYoutubeLikes();
-    }
+  setInterval(() => {
+    if (isDue(getLastYoutubePacedAt(), ytIntervalMs())) void runYoutube();
   }, 60_000);
 
   startLivePoller();
