@@ -5,7 +5,9 @@ import { useEffect, useRef, useState } from 'react';
 interface FieldDef {
   key: string;
   label: string;
+  displayKey?: string;
   type: 'number' | 'text' | 'select';
+  display?: 'minutes';
   step?: number;
   min?: number;
   max?: number;
@@ -21,9 +23,30 @@ const FIELDS: FieldDef[] = [
     ] },
   { key: 'BACKGROUND_LIMIT', label: 'バックグラウンド収集数', type: 'number', min: 1, step: 1 },
   { key: 'YUTURA_INTERVAL_HOURS', label: 'yutura ポーリング (時間)', type: 'number', min: 1, step: 1 },
-  { key: 'YOUTUBE_POLL_INTERVAL_HOURS', label: 'YouTube ポーリング (時間)', type: 'number', min: 1, step: 1, hint: 'YouTube API ポーリング周期。デフォルトは 6 時間です。' },
+  { key: 'YOUTUBE_POLL_INTERVAL_HOURS', displayKey: 'YOUTUBE_POLL_INTERVAL_MINUTES', label: 'YouTube ポーリング (分)', type: 'number', display: 'minutes', min: 1, step: 1, hint: 'YouTube API ポーリング周期。5 分なら 5 と入力します。' },
   { key: 'TIMEZONE', label: 'タイムゾーン', type: 'text' },
 ];
+
+function toDisplayValue(field: FieldDef, value: string | number | undefined): string {
+  if (value == null || value === '') return '';
+  if (field.display === 'minutes') {
+    const n = Number(value);
+    return Number.isFinite(n) ? String(Math.round(n * 60 * 1000) / 1000) : String(value);
+  }
+  return String(value);
+}
+
+function toPayloadValues(values: Record<string, string>): Record<string, string> {
+  const payload = { ...values };
+  for (const field of FIELDS) {
+    if (field.display !== 'minutes') continue;
+    const raw = payload[field.key];
+    if (raw == null || raw === '') continue;
+    const minutes = Number(raw);
+    if (Number.isFinite(minutes)) payload[field.key] = String(minutes / 60);
+  }
+  return payload;
+}
 
 export function SettingsButton() {
   const [open, setOpen] = useState(false);
@@ -85,7 +108,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
         const next: Record<string, string> = {};
         for (const f of FIELDS) {
           const v = data[f.key];
-          next[f.key] = v == null ? '' : String(v);
+          next[f.key] = toDisplayValue(f, v);
         }
         setValues(next);
       })
@@ -107,7 +130,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
       const res = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(values),
+        body: JSON.stringify(toPayloadValues(values)),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null;
@@ -163,7 +186,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
             <label key={f.key} className="flex flex-col gap-1 text-[12px]">
               <span style={{ color: 'var(--color-soft)' }}>
                 {f.label}
-                <span className="ml-1 opacity-50 font-mono text-[10px]">{f.key}</span>
+                <span className="ml-1 opacity-50 font-mono text-[10px]">{f.displayKey ?? f.key}</span>
               </span>
               {f.type === 'select' ? (
                 <select
