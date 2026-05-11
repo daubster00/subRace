@@ -30,13 +30,82 @@ function sleep(ms: number): Promise<void> {
 }
 
 // yutura is behind Cloudflare, which blocks Node's fetch on TLS fingerprint
-// (JA3/JA4) even with browser-matching headers. We shell out to curl, whose
-// TLS handshake passes the WAF on Windows/macOS host curl. Inside a Linux
-// container the stock OpenSSL-backed curl is also blocked, so the Docker
-// image installs curl-impersonate and sets YUTURA_CURL_BIN=curl_chrome131.
+// (JA3/JA4) even with browser-matching headers. Two strategies, picked by env:
+//   1. FLARESOLVERR_URL set → route through FlareSolverr, which drives a real
+//      Chrome via undetected-chromedriver and can solve JS challenges that
+//      curl-impersonate cannot. Required when the server IP triggers a
+//      Managed Challenge (typical on datacenter/VPS ranges).
+//   2. Otherwise → shell out to curl-impersonate (YUTURA_CURL_BIN), which
+//      passes the JA3/JA4 check but cannot solve a JS challenge.
 const CURL_BIN = process.env.YUTURA_CURL_BIN ?? 'curl';
+const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL;
+const FLARESOLVERR_TIMEOUT_MS = 60_000;
 
-async function fetchHtml(url: string, referer?: string): Promise<string> {
+let flaresolverrSession: string | null = null;
+
+interface FlaresolverrResponse {
+  status: string;
+  message?: string;
+  session?: string;
+  solution?: {
+    url: string;
+    status: number;
+    response: string;
+  };
+}
+
+async function flaresolverrCall(
+  cmd: string,
+  params: Record<string, unknown> = {},
+): Promise<FlaresolverrResponse> {
+  const res = await fetch(`${FLARESOLVERR_URL}/v1`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cmd, maxTimeout: FLARESOLVERR_TIMEOUT_MS, ...params }),
+    signal: AbortSignal.timeout(FLARESOLVERR_TIMEOUT_MS + 5_000),
+  });
+  if (!res.ok) {
+    throw new Error(`flaresolverr_http_error status=${res.status}`);
+  }
+  const data = (await res.json()) as FlaresolverrResponse;
+  if (data.status !== 'ok') {
+    throw new Error(`flaresolverr_error message="${data.message ?? 'unknown'}"`);
+  }
+  return data;
+}
+
+async function ensureFlaresolverrSession(): Promise<string> {
+  if (flaresolverrSession) return flaresolverrSession;
+  const data = await flaresolverrCall('sessions.create');
+  if (!data.session) throw new Error('flaresolverr_no_session_returned');
+  flaresolverrSession = data.session;
+  return flaresolverrSession;
+}
+
+async function destroyFlaresolverrSession(): Promise<void> {
+  if (!flaresolverrSession) return;
+  const sid = flaresolverrSession;
+  flaresolverrSession = null;
+  try {
+    await flaresolverrCall('sessions.destroy', { session: sid });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`[worker] flaresolverr_session_destroy_failed reason=${message}`);
+  }
+}
+
+async function fetchViaFlaresolverr(url: string): Promise<string> {
+  const session = await ensureFlaresolverrSession();
+  const data = await flaresolverrCall('request.get', { url, session });
+  const sol = data.solution;
+  if (!sol) throw new Error(`yutura_http_error url=${url} reason=no_solution`);
+  if (sol.status >= 400) {
+    throw new Error(`yutura_http_error url=${url} status=${sol.status}`);
+  }
+  return sol.response;
+}
+
+async function fetchViaCurl(url: string, referer?: string): Promise<string> {
   const args = [
     '--silent',
     '--show-error',
@@ -65,6 +134,11 @@ async function fetchHtml(url: string, referer?: string): Promise<string> {
     const status = typeof e.code === 'number' ? e.code : 'unknown';
     throw new Error(`yutura_http_error url=${url} curl_exit=${status}`);
   }
+}
+
+async function fetchHtml(url: string, referer?: string): Promise<string> {
+  if (FLARESOLVERR_URL) return fetchViaFlaresolverr(url);
+  return fetchViaCurl(url, referer);
 }
 
 // Each ranking row is a single <li id="rankN"> ... </li> block. The block
@@ -249,5 +323,7 @@ export async function pollYutura(): Promise<void> {
     db.prepare(
       'INSERT INTO yutura_pulls (pulled_at, status, error) VALUES (?, ?, ?)',
     ).run(startedAt, 'failed', message);
+  } finally {
+    await destroyFlaresolverrSession();
   }
 }
