@@ -19,6 +19,15 @@ const LiveDetailsSchema = z.object({
 
 let currentLiveVideoId: string | null = null;
 let liveViewerIntervalId: ReturnType<typeof setInterval> | null = null;
+let currentChannelId: string | null = null;
+
+function stopLiveViewerPoller(): void {
+  currentLiveVideoId = null;
+  if (liveViewerIntervalId) {
+    clearInterval(liveViewerIntervalId);
+    liveViewerIntervalId = null;
+  }
+}
 
 function getLastLikeCount(): number | null {
   const row = db.prepare(
@@ -57,7 +66,14 @@ async function pollLiveViewers(): Promise<void> {
 
 async function detectLive(): Promise<void> {
   try {
-    const url = `https://www.googleapis.com/youtube/v3/search?part=id&channelId=${env.CLIENT_CHANNEL_ID}&eventType=live&type=video&key=${env.YOUTUBE_API_KEY}`;
+    const channelId = env.CLIENT_CHANNEL_ID;
+    if (currentChannelId !== channelId) {
+      currentChannelId = channelId;
+      stopLiveViewerPoller();
+      console.log(`[worker] live_channel_changed channel_id=${channelId}`);
+    }
+
+    const url = `https://www.googleapis.com/youtube/v3/search?part=id&channelId=${channelId}&eventType=live&type=video&key=${env.YOUTUBE_API_KEY}`;
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
     if (!response.ok) throw new Error(`http_error status=${response.status}`);
 
@@ -73,11 +89,7 @@ async function detectLive(): Promise<void> {
       void pollLiveViewers();
       liveViewerIntervalId = setInterval(() => void pollLiveViewers(), env.LIVE_VIEWER_POLL_INTERVAL_SECONDS * 1000);
     } else if (!liveVideoId) {
-      currentLiveVideoId = null;
-      if (liveViewerIntervalId) {
-        clearInterval(liveViewerIntervalId);
-        liveViewerIntervalId = null;
-      }
+      stopLiveViewerPoller();
       const now = new Date().toISOString();
       const likeCount = getLastLikeCount();
       db.prepare(`
@@ -93,5 +105,8 @@ async function detectLive(): Promise<void> {
 
 export function startLivePoller(): void {
   void detectLive();
+  setInterval(() => {
+    if (currentChannelId !== env.CLIENT_CHANNEL_ID) void detectLive();
+  }, 5_000);
   setInterval(() => void detectLive(), 60 * 60 * 1000);
 }
