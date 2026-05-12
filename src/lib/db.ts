@@ -46,9 +46,25 @@ function runMigrations(db: Database.Database): void {
   }
 }
 
-const db = globalThis._db ?? createDb();
-if (process.env.NODE_ENV !== 'production') {
-  globalThis._db = db;
+// Lazy init: `next build` collects page data with 8 parallel workers, each
+// importing this module. Opening the DB eagerly here makes them race to create
+// data/subrace.db and fail with SQLITE_BUSY. Defer init until first real use.
+let dbInstance: Database.Database | undefined;
+function getDb(): Database.Database {
+  if (dbInstance) return dbInstance;
+  dbInstance = globalThis._db ?? createDb();
+  if (process.env.NODE_ENV !== 'production') {
+    globalThis._db = dbInstance;
+  }
+  return dbInstance;
 }
+
+const db = new Proxy({} as Database.Database, {
+  get(_target, prop) {
+    const real = getDb();
+    const value = Reflect.get(real, prop, real);
+    return typeof value === 'function' ? (value as Function).bind(real) : value;
+  },
+});
 
 export default db;

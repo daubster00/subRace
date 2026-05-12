@@ -212,13 +212,16 @@ export function readSnapshot(): SnapshotResponse {
     };
   });
 
-  // 2. 클라이언트 채널 최신 1행
+  // 2. 클라이언트 채널 최신 1행 — 현재 CLIENT_CHANNEL_ID 의 스냅샷만.
+  // 채널 ID를 바꾸면 이전 채널의 행은 ignore 되어 SummaryCard 가 잔재 데이터를
+  // 보여주지 않는다. 새 채널의 데이터가 들어올 때까지는 빈 상태로 표시된다.
   const clientRow = db.prepare(`
     SELECT polled_at, live_viewers, like_count
     FROM   client_channel_snapshots
+    WHERE  channel_id = ?
     ORDER  BY polled_at DESC
     LIMIT  1
-  `).get() as ClientRow | undefined;
+  `).get(env.CLIENT_CHANNEL_ID) as ClientRow | undefined;
 
   const clientChannel: ClientChannel = {
     liveViewers:      clientRow?.live_viewers   ?? null,

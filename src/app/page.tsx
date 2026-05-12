@@ -20,6 +20,7 @@ export default async function Home() {
     estimationSafetyRatio: env.ESTIMATION_SAFETY_RATIO,
     rankAlertAbsoluteThreshold: env.RANK_ALERT_ABSOLUTE_THRESHOLD,
     rankAlertTimeThresholdHours: env.RANK_ALERT_TIME_THRESHOLD_HOURS,
+    timezone: env.TIMEZONE,
   };
 
   return <Dashboard initialData={initialData} displayLimit={env.DISPLAY_LIMIT} config={config} />;

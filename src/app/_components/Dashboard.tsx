@@ -56,7 +56,13 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
   );
   const displayChannels = interpolatedChannels.length > 0
     ? interpolatedChannels
-    : snapshot.channels.map((ch) => ({ ...ch, prevCount: ch.subscriberCount }));
+    : snapshot.channels.map((ch) => ({
+        ...ch,
+        prevCount: ch.subscriberCount,
+        polledSubscriberCount: ch.subscriberCount,
+        motionActiveUntil: 0,
+        motionDirection: 0 as const,
+      }));
   const pageSize = 50;
   const activePage = displayLimit === 100 ? rankPage : 0;
   const pageStart = activePage * pageSize;
@@ -134,11 +140,10 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
         background: 'linear-gradient(180deg, rgba(0,178,255,0.02), rgba(0,0,0,0))',
       }}
     >
-      <Header />
+      <Header timezone={config.timezone} />
       <main className="flex-1 min-h-0 flex flex-col px-[var(--page-padding)] pt-3">
         <Hero
           clientChannel={snapshot.clientChannel}
-          serverTime={snapshot.serverTime}
           displayLimit={displayLimit}
         />
         <Legend />

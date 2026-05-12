@@ -3,4 +3,5 @@ export interface ClientConfig {
   estimationSafetyRatio: number;
   rankAlertAbsoluteThreshold: number;
   rankAlertTimeThresholdHours: number;
+  timezone: string;
 }

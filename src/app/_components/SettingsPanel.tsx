@@ -13,17 +13,22 @@ interface FieldDef {
   max?: number;
   options?: { value: string; label: string }[];
   hint?: string;
+  // When true, an empty value is sent to the server (= clear this override).
+  // Otherwise an empty field means "leave unchanged".
+  allowEmpty?: boolean;
 }
 
 const FIELDS: FieldDef[] = [
-  { key: 'CLIENT_CHANNEL_ID', label: '対象 YouTube チャンネル ID', type: 'text', hint: 'UCxxxxxxxxxxxxxxxxxxxxxx 形式。変更後は次回ポーリングから反映されます。' },
+  { key: 'CLIENT_CHANNEL_ID', label: '対象 YouTube チャンネル ID', type: 'text', hint: 'UCxxxxxxxxxxxxxxxxxxxxxx 形式。保存後すぐに新チャンネルのライブ / 高評価を取得します (数秒〜十数秒)。取得完了までは「—」/「0」と表示されます。' },
+  { key: 'CLIENT_VIDEO_ID', label: '対象 動画 ID (任意)', type: 'text', allowEmpty: true, hint: 'YouTube URL の v= 以降 11 文字 (例: dQw4w9WgXcQ)。指定すると search.list (100 units) を完全に省略し、この動画から直接ライブ視聴者数と高評価数を取得します。ライブ終了後は空欄に戻すか別の動画 ID を入れてください。' },
   { key: 'DISPLAY_LIMIT', label: '表示順位数', type: 'select', options: [
       { value: '50', label: '50位' },
       { value: '100', label: '100位 (ページング)' },
     ] },
   { key: 'BACKGROUND_LIMIT', label: 'バックグラウンド収集数', type: 'number', min: 1, step: 1 },
   { key: 'YUTURA_INTERVAL_HOURS', label: 'yutura ポーリング (時間)', type: 'number', min: 1, step: 1 },
-  { key: 'YOUTUBE_POLL_INTERVAL_HOURS', displayKey: 'YOUTUBE_POLL_INTERVAL_MINUTES', label: 'YouTube ポーリング (分)', type: 'number', display: 'minutes', min: 1, step: 1, hint: 'YouTube API ポーリング周期。5 分なら 5 と入力します。' },
+  { key: 'YOUTUBE_POLL_INTERVAL_HOURS', displayKey: 'YOUTUBE_POLL_INTERVAL_MINUTES', label: 'ランキング ポーリング (分)', type: 'number', display: 'minutes', min: 1, step: 1, hint: '150 チャンネルの登録者ランキング更新周期。channels.list = 3 units/回 のみなので 5 分でも安全。' },
+  { key: 'YOUTUBE_LIKES_POLL_INTERVAL_HOURS', displayKey: 'YOUTUBE_LIKES_POLL_INTERVAL_MINUTES', label: '高評価 ポーリング (分)', type: 'number', display: 'minutes', min: 1, step: 1, hint: 'SummaryCard の高評価更新周期。CLIENT_VIDEO_ID 指定時は 1 unit/回 で短くしても安全。未指定だと初回 search.list (100 units) が走るので長めに。' },
   { key: 'TIMEZONE', label: 'タイムゾーン', type: 'text' },
 ];
 
@@ -148,7 +153,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
     <div
       role="dialog"
       aria-label="環境設定"
-      className="absolute right-0 top-[calc(100%+8px)] z-50 w-[360px] max-h-[80vh] overflow-y-auto rounded-md p-4"
+      className="thin-scrollbar absolute right-0 top-[calc(100%+8px)] z-50 w-[360px] max-h-[80vh] overflow-y-auto rounded-md p-4"
       style={{
         background: 'var(--color-surface-strong)',
         border: '1px solid var(--color-border-strong)',

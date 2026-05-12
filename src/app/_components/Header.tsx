@@ -1,6 +1,11 @@
 import { SettingsButton } from './SettingsPanel';
+import { Clock } from './Clock';
 
-export function Header() {
+interface HeaderProps {
+  timezone: string;
+}
+
+export function Header({ timezone }: HeaderProps) {
   return (
     <header
       className="flex-none h-[42px] flex items-center justify-between px-[var(--page-padding)]"
@@ -21,7 +26,10 @@ export function Header() {
           ライブサブランク
         </span>
       </div>
-      <SettingsButton />
+      <div className="inline-flex items-center gap-3">
+        <Clock timezone={timezone} />
+        <SettingsButton />
+      </div>
     </header>
   );
 }

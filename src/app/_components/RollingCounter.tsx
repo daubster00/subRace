@@ -6,6 +6,7 @@ import type { CSSProperties } from 'react';
 interface RollingCounterProps {
   value: number;
   prevPolledCount?: number;
+  motionActiveUntil?: number;
 }
 
 const MIN_DIGIT_DURATION = 2_100;
@@ -119,7 +120,7 @@ function DigitWheel({ digit, previousDigit, direction, delay }: DigitWheelProps)
   );
 }
 
-export function RollingCounter({ value, prevPolledCount }: RollingCounterProps) {
+export function RollingCounter({ value, prevPolledCount, motionActiveUntil = 0 }: RollingCounterProps) {
   const [deltaState, setDeltaState] = useState<DeltaState | null>(null);
   const prevRef = useRef<number>(value);
   const prevCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -130,12 +131,19 @@ export function RollingCounter({ value, prevPolledCount }: RollingCounterProps) 
     if (value === source) return;
 
     deltaSourceRef.current = value;
+    const now = Date.now();
+    // 모션 활성 구간이 주어지면 그 종료에 맞춰 증감 표시를 숨김
+    // (테두리 모션과 동일 시점에 사라지도록)
+    const visibleUntil = motionActiveUntil > now
+      ? motionActiveUntil
+      : now + DELTA_HOLD_MS;
+
     setDeltaState({
       direction: value > source ? 1 : -1,
       delta: Math.abs(value - source),
-      visibleUntil: Date.now() + DELTA_HOLD_MS,
+      visibleUntil,
     });
-  }, [value]);
+  }, [value, motionActiveUntil]);
 
   useEffect(() => {
     if (deltaState === null) return;

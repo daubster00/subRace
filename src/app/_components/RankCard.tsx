@@ -25,10 +25,13 @@ const cornerPositions = [
 
 export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProps) {
   const prevRankRef = useRef(rank);
-  const prevCountRef = useRef(channel.subscriberCount);
+  const motionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isSwapping, setIsSwapping] = useState(false);
-  const [isNew, setIsNew] = useState(true);
   const [isCounting, setIsCounting] = useState(false);
+  // 모션이 시작될 때(activeUntil이 새로 잡힐 때) 그 시점의 방향을 래치한다.
+  // subscriberCount 변화는 모션 시작보다 150~600ms 늦게 발생하므로
+  // 카운트 기반으로 색을 정하면 테두리가 이전 모션 색으로 잠깐 그려졌다가
+  // 뒤늦게 뒤집히는 깜빡임이 생긴다.
   const [countDirection, setCountDirection] = useState<1 | -1>(1);
 
   // 순위 변경 감지 → 스왑 글로우 800ms
@@ -41,23 +44,34 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
     }
   }, [rank]);
 
-  // 마운트 시 진입 글로우 1800ms
+  // 모션 활성 구간 = 테두리 트레이스 + 글로우 + 증감 표시 노출 구간
+  // motionActiveUntil이 바뀌는 시점은 곧 새 모션의 시작이므로,
+  // 같은 타이밍에 방향도 함께 래치해 트레이스가 항상 정확한 색으로 시작되게 한다.
   useEffect(() => {
-    const t = setTimeout(() => setIsNew(false), 1800);
-    return () => clearTimeout(t);
-  }, []);
+    if (motionTimerRef.current !== null) {
+      clearTimeout(motionTimerRef.current);
+      motionTimerRef.current = null;
+    }
 
-  // 숫자 변경 감지 → 카운터 롤링 시간 동안 테두리 글로우
-  useEffect(() => {
-    if (prevCountRef.current === channel.subscriberCount) return;
+    const remaining = channel.motionActiveUntil - Date.now();
+    if (remaining <= 0) {
+      setIsCounting(false);
+      return;
+    }
 
-    setCountDirection(channel.subscriberCount > prevCountRef.current ? 1 : -1);
-    prevCountRef.current = channel.subscriberCount;
+    if (channel.motionDirection !== 0) {
+      setCountDirection(channel.motionDirection);
+    }
     setIsCounting(true);
+    motionTimerRef.current = setTimeout(() => {
+      setIsCounting(false);
+      motionTimerRef.current = null;
+    }, remaining);
+  }, [channel.motionActiveUntil, channel.motionDirection]);
 
-    const t = setTimeout(() => setIsCounting(false), COUNT_GLOW_DURATION_MS);
-    return () => clearTimeout(t);
-  }, [channel.subscriberCount]);
+  useEffect(() => () => {
+    if (motionTimerRef.current !== null) clearTimeout(motionTimerRef.current);
+  }, []);
 
   const countTraceColor = countDirection > 0
     ? 'rgba(32,228,81,0.95)'
@@ -66,20 +80,16 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
     ? '0 0 6px rgba(32,228,81,0.24), inset 0 0 13px rgba(32,228,81,0.24), inset 0 1px 0 rgba(255,255,255,0.05)'
     : '0 0 6px rgba(255,63,70,0.24), inset 0 0 13px rgba(255,63,70,0.24), inset 0 1px 0 rgba(255,255,255,0.05)';
 
-  // 글로우 상태 우선순위: isCounting > isSwapping > isNew > 기본
+  // 글로우 상태 우선순위: isCounting > isSwapping > 기본
   // (isAlerted는 테두리 대신 보라색 오버레이로 표시)
   const borderColor = isSwapping
     ? 'rgba(0,178,255,0.65)'
-    : isNew
-    ? 'rgba(30,230,184,0.6)'
     : 'rgba(0,178,255,0.16)';
 
   const boxShadow = isCounting
     ? countGlowShadow
     : isSwapping
     ? '0 0 16px rgba(0,178,255,0.45), inset 0 1px 0 rgba(255,255,255,0.03)'
-    : isNew
-    ? '0 0 20px rgba(30,230,184,0.35), inset 0 1px 0 rgba(255,255,255,0.03)'
     : 'inset 0 1px 0 rgba(255,255,255,0.03)';
   const motionDelay = (motionIndex % 10) * 0.018 + Math.floor((motionIndex % 50) / 10) * 0.035;
   const motionDuration = 0.34 + (motionIndex % 7) * 0.035;
@@ -252,6 +262,7 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
                 ? channel.prevCount
                 : undefined
             }
+            motionActiveUntil={channel.motionActiveUntil}
           />
         </div>
       </div>

@@ -13,7 +13,15 @@ const envSchema = z.object({
   YUTURA_REQUEST_DELAY_MS: z.coerce.number().int().min(0).default(1500),
   // Fractional values allowed so we can dial polling down to minutes for testing.
   // Floor of 0.01h (~36s) keeps anyone from accidentally hammering the YouTube API.
+  // YOUTUBE_POLL_INTERVAL_HOURS now controls ONLY the 150-channel ranking poll
+  // (channels.list, 3 units/cycle). Likes polling has its own cadence so a
+  // fast ranking refresh doesn't drag the more expensive likes endpoint along.
   YOUTUBE_POLL_INTERVAL_HOURS: z.coerce.number().min(0.01).default(6),
+  // Likes polling cadence. With CLIENT_VIDEO_ID set this is just 1 unit/cycle
+  // (videos.list), so a tight interval is cheap. Without it, the auto fallback
+  // path can cost up to 101 units/cycle on a cache miss — keep this generous
+  // unless you've pinned CLIENT_VIDEO_ID.
+  YOUTUBE_LIKES_POLL_INTERVAL_HOURS: z.coerce.number().min(0.01).default(0.5),
   SURGE_WINDOW_HOURS: z.coerce.number().min(0.01).default(24),
   ESTIMATION_SAFETY_RATIO: z.coerce.number().min(0).max(1).default(0.85),
   RANK_ALERT_ABSOLUTE_THRESHOLD: z.coerce.number().int().min(0).default(10000),
@@ -27,6 +35,12 @@ const envSchema = z.object({
   BASIC_AUTH_USERNAME: z.string().min(1, "BASIC_AUTH_USERNAME is required"),
   BASIC_AUTH_PASSWORD: z.string().min(1, "BASIC_AUTH_PASSWORD is required"),
   YOUTUBE_API_KEY: z.string().min(1, "YOUTUBE_API_KEY is required"),
+
+  // Optional manual override. When set, detectLive / pollYoutubeLikes use this
+  // video id directly instead of issuing search.list (100 units/call) to find
+  // the channel's current live stream or latest video. Empty string = use
+  // auto-detect path.
+  CLIENT_VIDEO_ID: z.string().default(""),
 });
 
 const parsed = envSchema.safeParse(process.env);

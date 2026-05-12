@@ -1,12 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { SummaryCard } from './SummaryCard';
 import type { ClientChannel } from '@/lib/snapshot';
 
 interface HeroProps {
   clientChannel: ClientChannel;
-  serverTime: string;
   displayLimit: 50 | 100;
 }
 
@@ -20,27 +18,12 @@ const LikeIcon = (
     <path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3" /><path d="M7 22V10l5-8a2.4 2.4 0 0 1 4.4 1.7L15 9h5a2 2 0 0 1 2 2.3l-1.4 8A3 3 0 0 1 17.7 22H7Z" />
   </svg>
 );
-const UpdateIcon = (
-  <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-    <path d="M21 12a9 9 0 0 1-9 9a9.8 9.8 0 0 1-6.9-2.9" /><path d="M3 12a9 9 0 0 1 9-9a9.8 9.8 0 0 1 6.9 2.9" /><path d="M21 3v6h-6" /><path d="M3 21v-6h6" />
-  </svg>
-);
 
-export function Hero({ clientChannel, serverTime, displayLimit }: HeroProps) {
-  const [now, setNow] = useState(() => new Date(serverTime));
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
+export function Hero({ clientChannel, displayLimit }: HeroProps) {
   const viewers = clientChannel.liveViewers != null
     ? clientChannel.liveViewers.toLocaleString('ja-JP')
     : '—';
   const likes = clientChannel.likeCount.toLocaleString('ja-JP');
-  const serverDate = new Date(serverTime);
-  const ageSeconds = Math.max(0, Math.floor((now.getTime() - serverDate.getTime()) / 1000));
-  const updateLabel = `${ageSeconds}秒前`;
 
   return (
     <section className="flex-none flex justify-between items-start gap-[14px]">
@@ -62,14 +45,13 @@ export function Hero({ clientChannel, serverTime, displayLimit }: HeroProps) {
         aria-label="ライブ概要情報"
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, minmax(124px, 1fr))',
+          gridTemplateColumns: 'repeat(2, minmax(124px, 1fr))',
           gap: '8px',
-          minWidth: '402px',
+          minWidth: '268px',
         }}
       >
         <SummaryCard icon={ViewersIcon} label="視聴中" value={viewers} />
         <SummaryCard icon={LikeIcon}    label="高評価" value={likes} />
-        <SummaryCard icon={UpdateIcon}  label="更新" value={updateLabel} />
       </div>
     </section>
   );

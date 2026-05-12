@@ -17,16 +17,24 @@ const LatestVideoSchema = z.object({
   })).default([]),
 });
 
-async function findLikeTargetVideoId(): Promise<string | null> {
+async function findLikeTargetVideoId(channelId: string): Promise<string | null> {
+  // Manual override wins: skips search.list (100 units) entirely. This is the
+  // recommended path for operators tracking a known live event.
+  const manualVideoId = env.CLIENT_VIDEO_ID;
+  if (manualVideoId) return manualVideoId;
+
+  // Reuse the live video id if we already recorded one *for this channel*.
+  // Without the channel_id filter, a channel swap would still pull the previous
+  // channel's video id and report its likes.
   const lastLive = db.prepare(
-    'SELECT live_video_id FROM client_channel_snapshots WHERE live_video_id IS NOT NULL ORDER BY polled_at DESC LIMIT 1'
-  ).get() as { live_video_id: string } | undefined;
+    'SELECT live_video_id FROM client_channel_snapshots WHERE channel_id = ? AND live_video_id IS NOT NULL ORDER BY polled_at DESC LIMIT 1'
+  ).get(channelId) as { live_video_id: string } | undefined;
 
   if (lastLive) {
     return lastLive.live_video_id;
   }
 
-  const url = `https://www.googleapis.com/youtube/v3/search?part=id&channelId=${env.CLIENT_CHANNEL_ID}&type=video&order=date&maxResults=1&key=${env.YOUTUBE_API_KEY}`;
+  const url = `https://www.googleapis.com/youtube/v3/search?part=id&channelId=${channelId}&type=video&order=date&maxResults=1&key=${env.YOUTUBE_API_KEY}`;
   const response = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(`http_error status=${response.status}`);
 
@@ -38,9 +46,10 @@ async function findLikeTargetVideoId(): Promise<string | null> {
 }
 
 export async function pollYoutubeLikes(): Promise<void> {
+  const channelId = env.CLIENT_CHANNEL_ID;
   const now = new Date().toISOString();
   try {
-    const videoId = await findLikeTargetVideoId();
+    const videoId = await findLikeTargetVideoId(channelId);
 
     if (!videoId) {
       return;
@@ -58,16 +67,17 @@ export async function pollYoutubeLikes(): Promise<void> {
     const likeCount = item?.statistics?.likeCount ? parseInt(item.statistics.likeCount, 10) : 0;
 
     const existingRow = db.prepare(
-      'SELECT polled_at FROM client_channel_snapshots ORDER BY polled_at DESC LIMIT 1'
-    ).get() as { polled_at: string } | undefined;
+      'SELECT polled_at FROM client_channel_snapshots WHERE channel_id = ? ORDER BY polled_at DESC LIMIT 1'
+    ).get(channelId) as { polled_at: string } | undefined;
 
     if (existingRow) {
-      db.prepare('UPDATE client_channel_snapshots SET like_count = ? WHERE polled_at = ?').run(likeCount, existingRow.polled_at);
+      db.prepare('UPDATE client_channel_snapshots SET like_count = ? WHERE polled_at = ? AND channel_id = ?')
+        .run(likeCount, existingRow.polled_at, channelId);
     } else {
       db.prepare(`
-        INSERT OR REPLACE INTO client_channel_snapshots (polled_at, live_viewers, like_count, live_video_id)
-        VALUES (?, NULL, ?, ?)
-      `).run(now, likeCount, videoId);
+        INSERT OR REPLACE INTO client_channel_snapshots (polled_at, live_viewers, like_count, live_video_id, channel_id)
+        VALUES (?, NULL, ?, ?, ?)
+      `).run(now, likeCount, videoId, channelId);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

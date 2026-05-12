@@ -112,6 +112,28 @@
   }
 }
 
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 178, 255, 0.35) transparent;
+}
+.thin-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 178, 255, 0.28);
+  border-radius: 999px;
+}
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 178, 255, 0.55);
+}
+.thin-scrollbar::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 html, body {
   margin: 0;
   height: 100%;

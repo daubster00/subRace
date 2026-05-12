@@ -7,24 +7,40 @@ import type { Channel, SnapshotResponse } from '@/lib/snapshot';
 export interface InterpolatedChannel extends Omit<Channel, 'subscriberCount'> {
   subscriberCount: number;
   prevCount: number;
+  polledSubscriberCount: number;
+  motionActiveUntil: number;
+  motionDirection: -1 | 0 | 1;
 }
 
 const CORRECTION_DURATION_MS = 1500;
-const MIN_IDLE_MS = 4_000;
-const MAX_IDLE_MS = 55_000;
-const MIN_BURST_MS = 2_500;
-const MAX_BURST_MS = 12_000;
+// Matches the total RankCard border trace + corner animation time
+// (left trace: 1575ms delay + 2600ms duration ≈ 4175ms)
+const MOTION_TOTAL_DURATION_MS = 4_200;
+const DISPLAY_COUNTS_STORAGE_KEY = 'subRace:displayCounts:v1';
+const DISPLAY_COUNTS_TTL_MS = 24 * 60 * 60 * 1000;
+const DISPLAY_COUNTS_SAVE_INTERVAL_MS = 2_000;
 const MIN_STEP_MS = 650;
-const MAX_STEP_MS = 2_200;
-const MIN_AFTER_CHANGE_COOLDOWN_MS = 8_000;
-const MAX_AFTER_CHANGE_COOLDOWN_MS = 24_000;
+const MAX_STEP_MS = 1_400;
+const MIN_IDLE_MS = 2_500;
+const MAX_IDLE_MS = 14_000;
+const FLAT_DRIFT_MIN_DECISION_MS = 3_500;
+const FLAT_DRIFT_MAX_DECISION_MS = 12_000;
+const MOTION_REPEAT_COOLDOWN_MIN_MS = 7_000;
+const MOTION_REPEAT_COOLDOWN_MAX_MS = 20_000;
+const MAX_ACTIVE_MOTIONS = 6;
+// 채널 간 새 모션 시작 사이의 최소 간격(랜덤). 같은 프레임/근접 프레임에
+// 여러 채널이 동시에 모션을 시작해 어색하게 보이는 것을 막는다.
+// 상한은 "전체 뷰에서 변화가 멈춰 있는 최대 시간"을 직접 결정한다 — 3초 미만으로 유지.
+const MIN_NEW_MOTION_GAP_MS = 220;
+const MAX_NEW_MOTION_GAP_MS = 2_400;
 
 interface MotionState {
   nextDecisionAt: number;
   activeUntil: number;
   nextStepAt: number;
   direction: -1 | 0 | 1;
-  cooldownUntil: number;
+  driftTarget: number;
+  repeatBlockedUntil: number;
 }
 
 function randomBetween(min: number, max: number): number {
@@ -43,29 +59,98 @@ function getSignedStep(gap: number): number {
   return Math.sign(gap) * Math.max(1, Math.min(absGap, Math.round(randomBetween(1, ceiling))));
 }
 
-function scheduleIdle(state: MotionState, now: number, pressure: number) {
-  const pressureFactor = clamp(pressure, 0, 1);
-  const idleMs = randomBetween(MIN_IDLE_MS, MAX_IDLE_MS * (1 - pressureFactor * 0.72));
-  state.direction = 0;
-  state.activeUntil = 0;
-  state.nextStepAt = 0;
-  state.nextDecisionAt = now + idleMs;
+function getFlatDriftAmplitude(count: number): number {
+  if (count >= 50_000_000) return 2_400;
+  if (count >= 10_000_000) return 1_500;
+  if (count >= 5_000_000) return 1_000;
+  if (count >= 1_000_000) return 650;
+  return 260;
 }
 
-function scheduleBurst(state: MotionState, now: number, direction: -1 | 1) {
+function createMotionState(now: number): MotionState {
+  return {
+    nextDecisionAt: now + randomBetween(0, MAX_IDLE_MS),
+    activeUntil: 0,
+    nextStepAt: 0,
+    direction: 0,
+    driftTarget: 0,
+    repeatBlockedUntil: 0,
+  };
+}
+
+function startMotion(state: MotionState, now: number, direction: -1 | 1, driftTarget: number) {
   state.direction = direction;
-  state.activeUntil = now + randomBetween(MIN_BURST_MS, MAX_BURST_MS);
-  state.nextStepAt = now + randomBetween(120, 900);
-  state.nextDecisionAt = state.activeUntil + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
+  state.driftTarget = driftTarget;
+  state.activeUntil = now + MOTION_TOTAL_DURATION_MS;
+  state.nextStepAt = now + randomBetween(150, 600);
 }
 
-function scheduleAfterChangeCooldown(state: MotionState, now: number) {
-  const cooldownMs = randomBetween(MIN_AFTER_CHANGE_COOLDOWN_MS, MAX_AFTER_CHANGE_COOLDOWN_MS);
+function endMotion(state: MotionState, now: number) {
   state.direction = 0;
   state.activeUntil = 0;
   state.nextStepAt = 0;
-  state.cooldownUntil = now + cooldownMs;
-  state.nextDecisionAt = state.cooldownUntil + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
+  state.driftTarget = 0;
+  state.repeatBlockedUntil = now + randomBetween(MOTION_REPEAT_COOLDOWN_MIN_MS, MOTION_REPEAT_COOLDOWN_MAX_MS);
+  state.nextDecisionAt = state.repeatBlockedUntil + randomBetween(FLAT_DRIFT_MIN_DECISION_MS, FLAT_DRIFT_MAX_DECISION_MS);
+}
+
+function stepFlatCount({
+  current,
+  polled,
+  state,
+  now,
+  canStartMotion,
+}: {
+  current: number;
+  polled: number;
+  state: MotionState;
+  now: number;
+  canStartMotion: boolean;
+}): number {
+  if (state.direction !== 0 && now > state.activeUntil) {
+    endMotion(state, now);
+  }
+
+  if (state.direction === 0 && now >= state.nextDecisionAt) {
+    if (!canStartMotion || now < state.repeatBlockedUntil) {
+      state.nextDecisionAt = Math.max(state.repeatBlockedUntil, now + randomBetween(2_000, 7_000));
+      return current;
+    }
+
+    const amplitude = getFlatDriftAmplitude(polled);
+    const distanceFromPolled = current - polled;
+    const shouldReturn = Math.abs(distanceFromPolled) > amplitude * 0.65 || Math.random() < 0.38;
+    const nextOffset = shouldReturn
+      ? randomBetween(-amplitude * 0.18, amplitude * 0.18)
+      : randomBetween(-amplitude, amplitude);
+
+    const driftTarget = Math.round(polled + nextOffset);
+    const direction = Math.sign(driftTarget - current) as -1 | 0 | 1;
+    if (direction === 0) {
+      state.nextDecisionAt = now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
+      return current;
+    }
+    startMotion(state, now, direction, driftTarget);
+  }
+
+  if (state.direction === 0 || now < state.nextStepAt || now > state.activeUntil) {
+    return current;
+  }
+
+  const gap = state.driftTarget - current;
+  if (gap === 0) {
+    state.nextStepAt = now + randomBetween(MIN_STEP_MS, MAX_STEP_MS);
+    return current;
+  }
+  const next = current + getSignedStep(gap);
+  const stepped = gap > 0 ? Math.min(next, state.driftTarget) : Math.max(next, state.driftTarget);
+  // 한 모션 구간에서 숫자는 정확히 한 번만 변화한다
+  if (stepped !== current) {
+    state.nextStepAt = state.activeUntil + 1;
+  } else {
+    state.nextStepAt = now + randomBetween(MIN_STEP_MS, MAX_STEP_MS);
+  }
+  return stepped;
 }
 
 function stepNaturalCount({
@@ -75,6 +160,7 @@ function stepNaturalCount({
   target,
   stateMap,
   now,
+  canStartMotion,
 }: {
   channelId: string;
   current: number;
@@ -82,45 +168,46 @@ function stepNaturalCount({
   target: number;
   stateMap: Map<string, MotionState>;
   now: number;
+  canStartMotion: boolean;
 }): number {
-  const gapToTarget = target - current;
   const trend = Math.sign(target - polled) as -1 | 0 | 1;
-
-  if (trend === 0 || gapToTarget === 0) {
-    stateMap.delete(channelId);
-    return target;
-  }
 
   let state = stateMap.get(channelId);
   if (!state) {
-    state = {
-      nextDecisionAt: now + randomBetween(0, MAX_IDLE_MS),
-      activeUntil: 0,
-      nextStepAt: 0,
-      direction: 0,
-      cooldownUntil: 0,
-    };
+    state = createMotionState(now);
     stateMap.set(channelId, state);
   }
 
-  if (now < state.cooldownUntil) {
-    return current;
+  if (trend === 0 || target === current) {
+    return stepFlatCount({ current, polled, state, now, canStartMotion });
   }
 
-  if (now >= state.nextDecisionAt) {
-    const absGap = Math.abs(gapToTarget);
+  if (state.direction !== 0 && now > state.activeUntil) {
+    endMotion(state, now);
+  }
+
+  if (state.direction === 0 && now >= state.nextDecisionAt) {
+    if (!canStartMotion || now < state.repeatBlockedUntil) {
+      state.nextDecisionAt = Math.max(state.repeatBlockedUntil, now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS));
+      return current;
+    }
+
+    const absGap = Math.abs(target - current);
     const pressure = clamp(absGap / 2_000, 0, 1);
     const hasRoomForCorrection = trend > 0 ? current > polled + 3 : current < polled - 3;
-    const correctionDirection = (-trend) as -1 | 1;
     const shouldCorrect = hasRoomForCorrection && Math.random() < 0.16;
     const shouldMove = Math.random() < 0.35 + pressure * 0.45;
 
     if (shouldCorrect) {
-      scheduleBurst(state, now, correctionDirection);
+      const correctionDirection = (-trend) as -1 | 1;
+      const correctionTarget = trend > 0
+        ? Math.max(polled, current - Math.max(1, Math.round(randomBetween(2, 12))))
+        : Math.min(polled, current + Math.max(1, Math.round(randomBetween(2, 12))));
+      startMotion(state, now, correctionDirection, correctionTarget);
     } else if (shouldMove) {
-      scheduleBurst(state, now, trend);
+      startMotion(state, now, trend as -1 | 1, target);
     } else {
-      scheduleIdle(state, now, pressure);
+      state.nextDecisionAt = now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
     }
   }
 
@@ -128,23 +215,20 @@ function stepNaturalCount({
     return current;
   }
 
-  state.nextStepAt = now + randomBetween(MIN_STEP_MS, MAX_STEP_MS);
-
-  if (state.direction === trend) {
-    const next = current + getSignedStep(target - current);
-    const stepped = trend > 0 ? Math.min(next, target) : Math.max(next, target);
-    if (stepped !== current) scheduleAfterChangeCooldown(state, now);
-    return stepped;
+  const driftGap = state.driftTarget - current;
+  if (driftGap === 0) {
+    state.nextStepAt = now + randomBetween(MIN_STEP_MS, MAX_STEP_MS);
+    return current;
   }
 
-  const correctionFloor = trend > 0 ? polled : target;
-  const correctionCeil = trend > 0 ? target : polled;
-  const correctionTarget = trend > 0
-    ? Math.max(polled, current - Math.max(1, Math.round(randomBetween(1, 8))))
-    : Math.min(polled, current + Math.max(1, Math.round(randomBetween(1, 8))));
-
-  const stepped = clamp(correctionTarget, correctionFloor, correctionCeil);
-  if (stepped !== current) scheduleAfterChangeCooldown(state, now);
+  const next = current + getSignedStep(driftGap);
+  const stepped = driftGap > 0 ? Math.min(next, state.driftTarget) : Math.max(next, state.driftTarget);
+  // 한 모션 구간에서 숫자는 정확히 한 번만 변화한다
+  if (stepped !== current) {
+    state.nextStepAt = state.activeUntil + 1;
+  } else {
+    state.nextStepAt = now + randomBetween(MIN_STEP_MS, MAX_STEP_MS);
+  }
   return stepped;
 }
 
@@ -154,6 +238,47 @@ function getSnapshotTime(channels: Channel[]): number {
     .filter((time) => Number.isFinite(time));
 
   return times.length > 0 ? Math.max(...times) : Date.now();
+}
+
+function loadPersistedDisplayCounts(): Map<string, number> {
+  if (typeof window === 'undefined') return new Map();
+  try {
+    const raw = window.localStorage.getItem(DISPLAY_COUNTS_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as { savedAt?: unknown; counts?: unknown } | null;
+    if (
+      !parsed ||
+      typeof parsed.savedAt !== 'number' ||
+      Date.now() - parsed.savedAt > DISPLAY_COUNTS_TTL_MS ||
+      !parsed.counts ||
+      typeof parsed.counts !== 'object'
+    ) {
+      return new Map();
+    }
+    const entries = Object.entries(parsed.counts as Record<string, unknown>).filter(
+      (entry): entry is [string, number] =>
+        typeof entry[1] === 'number' && Number.isFinite(entry[1]) && entry[1] > 0
+    );
+    return new Map(entries);
+  } catch {
+    return new Map();
+  }
+}
+
+function persistDisplayCounts(counts: Map<string, number>, now: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const obj: Record<string, number> = {};
+    for (const [id, count] of counts) {
+      obj[id] = count;
+    }
+    window.localStorage.setItem(
+      DISPLAY_COUNTS_STORAGE_KEY,
+      JSON.stringify({ savedAt: now, counts: obj })
+    );
+  } catch {
+    // ignore quota / serialization errors
+  }
 }
 
 export function useInterpolatedSnapshot(
@@ -172,6 +297,22 @@ export function useInterpolatedSnapshot(
   const correctionStartCountsRef = useRef<Map<string, number>>(new Map());
   const correctionStartAtRef = useRef<number>(0);
   const motionStatesRef = useRef<Map<string, MotionState>>(new Map());
+  const lastPersistedAtRef = useRef<number>(0);
+  // 마지막으로 어떤 채널이 새 모션을 시작한 시각과, 다음 모션 시작까지 강제할 랜덤 gap.
+  // tick마다 새로 뽑지 않고 모션이 시작될 때만 갱신해, 시작 간격이 일관되게 분산된다.
+  const lastMotionStartedAtRef = useRef<number>(0);
+  const newMotionGapRef = useRef<number>(0);
+
+  // Hydrate drifted counts from localStorage on first render so a page reload
+  // (including the settings-save reload) preserves the last interpolated values.
+  const hydratedRef = useRef(false);
+  if (!hydratedRef.current) {
+    hydratedRef.current = true;
+    const persisted = loadPersistedDisplayCounts();
+    if (persisted.size > 0) {
+      displayCountsRef.current = persisted;
+    }
+  }
 
   const [interpolated, setInterpolated] = useState<InterpolatedChannel[]>([]);
 
@@ -224,14 +365,27 @@ export function useInterpolatedSnapshot(
     const tInterval = pollIntervalHours * 3600;
 
     function tick() {
-      const elapsedSeconds = (Date.now() - snapshotArrivedAtRef.current) / 1000;
+      const now = Date.now();
+      const elapsedSeconds = (now - snapshotArrivedAtRef.current) / 1000;
 
-      const correctionElapsedMs = Date.now() - correctionStartAtRef.current;
+      const correctionElapsedMs = now - correctionStartAtRef.current;
       const correctionProgress = correctionStartAtRef.current === 0
         ? 1
         : Math.min(correctionElapsedMs / CORRECTION_DURATION_MS, 1);
-      // ease-out: reaches target quickly then slows down
       const correctionFactor = 1 - (1 - correctionProgress) ** 2;
+
+      // Count channels currently in an active motion window so we can cap concurrency
+      let activeMotionCount = 0;
+      for (const state of motionStatesRef.current.values()) {
+        if (state.direction !== 0 && state.activeUntil > now) {
+          activeMotionCount++;
+        }
+      }
+
+      // 직전 모션 시작으로부터 충분한 랜덤 간격이 지났을 때만 새 모션을 허용한다.
+      // 같은 tick / 가까운 tick에 여러 채널이 동시에 모션을 켜는 것을 막아 자연스럽게 분산시킨다.
+      let motionGapReady = lastMotionStartedAtRef.current === 0
+        || (now - lastMotionStartedAtRef.current) >= newMotionGapRef.current;
 
       const result: InterpolatedChannel[] = latestChannelsRef.current.map((ch) => {
         // 0은 "데이터 없음"(COALESCE 기본값)이므로 null과 동일하게 처리 — 보간 없음
@@ -245,26 +399,43 @@ export function useInterpolatedSnapshot(
         );
 
         let displayCount: number;
-        if (correctionProgress >= 1) {
-          displayCount = interpolatedTarget;
-        } else {
+        if (correctionProgress < 1) {
           const correctionStart = correctionStartCountsRef.current.get(ch.id) ?? interpolatedTarget;
           displayCount = Math.round(
             correctionStart + (interpolatedTarget - correctionStart) * correctionFactor
           );
           motionStatesRef.current.delete(ch.id);
-        }
+        } else {
+          const stateBefore = motionStatesRef.current.get(ch.id);
+          const wasActiveBefore = (stateBefore?.activeUntil ?? 0) > now && (stateBefore?.direction ?? 0) !== 0;
 
-        if (correctionProgress >= 1) {
           displayCount = stepNaturalCount({
             channelId: ch.id,
             current: previousDisplay,
             polled: sCurr,
             target: interpolatedTarget,
             stateMap: motionStatesRef.current,
-            now: Date.now(),
+            now,
+            canStartMotion: activeMotionCount < MAX_ACTIVE_MOTIONS && motionGapReady,
           });
+
+          const stateAfter = motionStatesRef.current.get(ch.id);
+          const isActiveAfter = (stateAfter?.activeUntil ?? 0) > now && (stateAfter?.direction ?? 0) !== 0;
+          if (!wasActiveBefore && isActiveAfter) {
+            activeMotionCount++;
+            lastMotionStartedAtRef.current = now;
+            newMotionGapRef.current = randomBetween(MIN_NEW_MOTION_GAP_MS, MAX_NEW_MOTION_GAP_MS);
+            motionGapReady = false;
+          }
         }
+
+        const motionState = motionStatesRef.current.get(ch.id);
+        const motionActiveUntil = motionState?.direction !== 0
+          ? (motionState?.activeUntil ?? 0)
+          : 0;
+        const motionDirection: -1 | 0 | 1 = motionActiveUntil > now
+          ? (motionState?.direction ?? 0)
+          : 0;
 
         displayCountsRef.current.set(ch.id, displayCount);
 
@@ -272,10 +443,19 @@ export function useInterpolatedSnapshot(
           ...ch,
           subscriberCount: displayCount,
           prevCount: previousDisplay,
+          polledSubscriberCount: sCurr,
+          motionActiveUntil,
+          motionDirection,
         };
       });
 
       setInterpolated(result);
+
+      if (now - lastPersistedAtRef.current >= DISPLAY_COUNTS_SAVE_INTERVAL_MS) {
+        lastPersistedAtRef.current = now;
+        persistDisplayCounts(displayCountsRef.current, now);
+      }
+
       rafRef.current = requestAnimationFrame(tick);
     }
 
