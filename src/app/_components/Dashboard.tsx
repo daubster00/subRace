@@ -63,10 +63,19 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
         motionActiveUntil: 0,
         motionDirection: 0 as const,
       }));
+  // Rank follows the displayed (drifted) count, not the polled count.
+  // Otherwise visible numbers can appear out-of-order between adjacent ranks
+  // when independent drift exceeds the polled gap.
+  const sortedDisplayChannels = [...displayChannels].sort((a, b) => {
+    if (b.subscriberCount !== a.subscriberCount) {
+      return b.subscriberCount - a.subscriberCount;
+    }
+    return a.id.localeCompare(b.id);
+  });
   const pageSize = 50;
   const activePage = displayLimit === 100 ? rankPage : 0;
   const pageStart = activePage * pageSize;
-  const visibleChannels = displayChannels.slice(pageStart, pageStart + pageSize);
+  const visibleChannels = sortedDisplayChannels.slice(pageStart, pageStart + pageSize);
 
   useEffect(() => {
     if (displayLimit !== 100) {
@@ -132,6 +141,35 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
   const alertedIds = new Set(
     alertPairs.flatMap((p) => [p.upperChannelId, p.lowerChannelId])
   );
+
+  // Auto-reload on new deploy: server pushes its buildId over SSE on connect
+  // (and again on EventSource auto-reconnect after the old container dies).
+  // First buildId is stored as the baseline; any mismatch triggers a reload so
+  // long-lived display tabs pick up new code without manual refresh.
+  useEffect(() => {
+    const es = new EventSource('/api/events');
+    let baselineBuildId: string | null = null;
+
+    const onHello = (event: MessageEvent) => {
+      try {
+        const { buildId } = JSON.parse(event.data) as { buildId?: unknown };
+        if (typeof buildId !== 'string' || buildId.length === 0) return;
+        if (baselineBuildId === null) {
+          baselineBuildId = buildId;
+        } else if (baselineBuildId !== buildId) {
+          window.location.reload();
+        }
+      } catch {
+        // ignore malformed payloads
+      }
+    };
+
+    es.addEventListener('hello', onHello);
+    return () => {
+      es.removeEventListener('hello', onHello);
+      es.close();
+    };
+  }, []);
 
   return (
     <div

@@ -232,12 +232,9 @@ function stepNaturalCount({
   return stepped;
 }
 
-function getSnapshotTime(channels: Channel[]): number {
-  const times = channels
-    .map((ch) => new Date(ch.snapshottedAt).getTime())
-    .filter((time) => Number.isFinite(time));
-
-  return times.length > 0 ? Math.max(...times) : Date.now();
+function getChannelSnapshotTime(ch: Channel): number {
+  const t = new Date(ch.snapshottedAt).getTime();
+  return Number.isFinite(t) ? t : Date.now();
 }
 
 function loadPersistedDisplayCounts(): Map<string, number> {
@@ -288,7 +285,11 @@ export function useInterpolatedSnapshot(
 ): InterpolatedChannel[] {
   const prevCountsRef = useRef<Map<string, number>>(new Map());
   const currCountsRef = useRef<Map<string, number>>(new Map());
-  const snapshotArrivedAtRef = useRef<number>(0);
+  // Per-channel arrival time. YouTube's subscriberCount is rounded to 3 sig
+  // figs for large channels, so many consecutive polls return an identical
+  // value. For unchanged channels we keep the old arrival time so interpolation
+  // keeps drifting upward instead of resetting back to the same polled value.
+  const snapshotArrivedAtRef = useRef<Map<string, number>>(new Map());
   const latestChannelsRef = useRef<Channel[]>([]);
   const rafRef = useRef<number | null>(null);
 
@@ -335,25 +336,44 @@ export function useInterpolatedSnapshot(
       }).filter((entry): entry is readonly [string, number] => entry[1] != null)
     );
 
-    let countsChanged = currCountsRef.current.size === 0;
-    if (!countsChanged) {
-      for (const [id, count] of incomingCounts) {
-        if (currCountsRef.current.get(id) !== count) {
-          countsChanged = true;
-          break;
-        }
+    const isFirstLoad = currCountsRef.current.size === 0;
+    const changedIds = new Set<string>();
+    for (const [id, count] of incomingCounts) {
+      if (currCountsRef.current.get(id) !== count) changedIds.add(id);
+    }
+
+    // Only channels whose polled value actually changed get a correction lerp.
+    // Unchanged channels keep drifting from their current display value — the
+    // YouTube API returns the same rounded count for hours/days, so snapping
+    // them back to that stale value would visibly undo legitimate drift.
+    if (!isFirstLoad && changedIds.size > 0 && displayCountsRef.current.size > 0) {
+      const startMap = new Map<string, number>();
+      for (const id of changedIds) {
+        const display = displayCountsRef.current.get(id);
+        if (display !== undefined) startMap.set(id, display);
+      }
+      if (startMap.size > 0) {
+        correctionStartCountsRef.current = startMap;
+        correctionStartAtRef.current = Date.now();
       }
     }
 
-    if (countsChanged) {
-      // Only start a correction lerp when replacing an existing snapshot (not first load)
-      if (currCountsRef.current.size > 0 && displayCountsRef.current.size > 0) {
-        correctionStartCountsRef.current = new Map(displayCountsRef.current);
-        correctionStartAtRef.current = Date.now();
+    prevCountsRef.current = incomingPreviousCounts;
+    currCountsRef.current = incomingCounts;
+
+    if (isFirstLoad) {
+      const seeded = new Map<string, number>();
+      for (const ch of data.channels) seeded.set(ch.id, getChannelSnapshotTime(ch));
+      snapshotArrivedAtRef.current = seeded;
+    } else if (changedIds.size > 0) {
+      for (const ch of data.channels) {
+        if (changedIds.has(ch.id)) {
+          snapshotArrivedAtRef.current.set(ch.id, getChannelSnapshotTime(ch));
+        }
       }
-      prevCountsRef.current = incomingPreviousCounts;
-      currCountsRef.current = incomingCounts;
-      snapshotArrivedAtRef.current = getSnapshotTime(data.channels);
+      for (const id of [...snapshotArrivedAtRef.current.keys()]) {
+        if (!incomingCounts.has(id)) snapshotArrivedAtRef.current.delete(id);
+      }
     }
 
     latestChannelsRef.current = data.channels;
@@ -366,7 +386,6 @@ export function useInterpolatedSnapshot(
 
     function tick() {
       const now = Date.now();
-      const elapsedSeconds = (now - snapshotArrivedAtRef.current) / 1000;
 
       const correctionElapsedMs = now - correctionStartAtRef.current;
       const correctionProgress = correctionStartAtRef.current === 0
@@ -394,15 +413,18 @@ export function useInterpolatedSnapshot(
         const sCurr = currCountsRef.current.get(ch.id) ?? ch.subscriberCount;
         const previousDisplay = displayCountsRef.current.get(ch.id) ?? sCurr;
 
+        const arrivedAt = snapshotArrivedAtRef.current.get(ch.id) ?? now;
+        const elapsedSeconds = (now - arrivedAt) / 1000;
+
         const interpolatedTarget = Math.round(
           interpolate({ sPrev, sCurr, tInterval, t: elapsedSeconds, safetyRatio })
         );
 
+        const correctionStartForChannel = correctionStartCountsRef.current.get(ch.id);
         let displayCount: number;
-        if (correctionProgress < 1) {
-          const correctionStart = correctionStartCountsRef.current.get(ch.id) ?? interpolatedTarget;
+        if (correctionProgress < 1 && correctionStartForChannel !== undefined) {
           displayCount = Math.round(
-            correctionStart + (interpolatedTarget - correctionStart) * correctionFactor
+            correctionStartForChannel + (interpolatedTarget - correctionStartForChannel) * correctionFactor
           );
           motionStatesRef.current.delete(ch.id);
         } else {
