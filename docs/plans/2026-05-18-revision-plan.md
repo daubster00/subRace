@@ -46,15 +46,32 @@
 - ✓ `next build` 성공
 - ⏳ **사용자 시각 검증 대기 중** — 배포 후 1억대/1천만대/100만대 채널 각각 단위 범위 내에서만 움직이는지, 하락 시 새 숫자가 위에서 내려오는지 확인
 
-### ⏭️ Phase B — 우상향 채널 정체 문제 (#3 본격 fix)
+### ✅ Phase B — 우상향 채널 정체 문제 (#3 임시 보정, 완료: 2026-05-18)
 
-Phase A의 bucket clamp는 "단위 벗어나지 않음"을 보장하지만, growthRate가 단위 라운딩 때문에 0으로 잡혀 정체로 보이는 근본 원인은 그대로. Phase C(milestone)가 들어오기 전까지 임시로:
+Phase A의 bucket clamp는 "단위 벗어나지 않음"을 보장했지만, growthRate가 단위 라운딩 때문에 0으로 잡혀 정체로 보이는 근본 원인은 Phase C(milestone)에서 해결. 그 전까지의 임시 보정 완료.
 
-- bucket 안에서 자연스러운 drift를 더 강화 (시각적 정체 완화)
-- `growthRatePerHour`가 0이어도 채널별 trend 방향(우상향/우하향)을 가벼운 baseline에서 추정
-- ISSEI / Akira 같은 큰 채널의 시각적 정체 완화 확인
+**완료 내역**:
+- [src/hooks/useInterpolatedSnapshot.ts](../../src/hooks/useInterpolatedSnapshot.ts):
+  - tick 안에서 채널별 `trendBias: -1 | 0 | 1` 계산
+    - 1차: `growthRatePerHour`의 부호 (단, `|rate| > 0.5` 일 때만)
+    - 2차 fallback: `trendBaselineSubscriberCount` 대비 현재 sCurr 부호
+  - `stepFlatCount` 인자에 `trendBias` 추가
+    - amplitude를 비대칭으로: 우상향이면 위로 `amplitude`, 아래로 `amplitude * 0.4`
+    - 우하향은 그 반대. trendBias=0 채널은 기존 대칭 동작 유지
+  - `stepNaturalCount`도 `trendBias`를 받아 flat 분기에 그대로 전달
 
-→ Phase C가 들어오면 이 임시 보정은 제거 가능.
+**효과**:
+- ISSEI / Akira처럼 polled 값이 단위 라운딩으로 정체된 채널 → flat 모드 진입 시 trendBaseline 부호로 위쪽 drift가 더 빈번하고 멀리 — 시각적으로 우상향 인식
+- bucket clamp는 그대로 작동해 단위 범위 이탈 없음
+- trendBias=0인 채널(신규 채널 / 진짜 정체)은 기존 동작 유지
+
+**검증**:
+- ✓ vitest 39 통과 (영향 없는 hook 변경)
+- ✓ `tsc --noEmit` 클린
+- ✓ `next build` 성공
+- ⏳ 사용자 시각 검증 대기 — 정체로 보이던 채널이 우상향으로 보이는지
+
+**Phase C 이후 제거 항목**: `trendBias` 인자, 비대칭 `upperReach/lowerReach` 분기. milestone 기반 정확한 rate가 들어오면 단위 라운딩 문제가 사라지므로 대칭 amplitude로 복원.
 
 ### ⏭️ Phase C — 60일 milestone 데이터 수집 (#5, #6, #7)
 

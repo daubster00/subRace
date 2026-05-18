@@ -109,6 +109,7 @@ function stepFlatCount({
   state,
   now,
   canStartMotion,
+  trendBias,
 }: {
   current: number;
   polled: number;
@@ -116,6 +117,7 @@ function stepFlatCount({
   state: MotionState;
   now: number;
   canStartMotion: boolean;
+  trendBias: -1 | 0 | 1;
 }): number {
   if (state.direction !== 0 && now > state.activeUntil) {
     endMotion(state, now);
@@ -128,11 +130,16 @@ function stepFlatCount({
     }
 
     const amplitude = getFlatDriftAmplitude(polled, bucket);
+    // Phase B 임시 보정: trendBias가 잡혀 있으면 반대 방향 swing을 축소해
+    // 단위 라운딩으로 정체된 우상향/우하향 채널이 시각적으로 그 방향을
+    // 더 자주, 더 멀리 움직이게 한다. Phase C(milestone) 이후 제거 가능.
+    const upperReach = trendBias < 0 ? amplitude * 0.4 : amplitude;
+    const lowerReach = trendBias > 0 ? amplitude * 0.4 : amplitude;
     const distanceFromPolled = current - polled;
     const shouldReturn = Math.abs(distanceFromPolled) > amplitude * 0.65 || Math.random() < 0.38;
     const nextOffset = shouldReturn
-      ? randomBetween(-amplitude * 0.18, amplitude * 0.18)
-      : randomBetween(-amplitude, amplitude);
+      ? randomBetween(-lowerReach * 0.18, upperReach * 0.18)
+      : randomBetween(-lowerReach, upperReach);
 
     const driftTarget = clampToBucket(Math.round(polled + nextOffset), bucket);
     const direction = Math.sign(driftTarget - current) as -1 | 0 | 1;
@@ -172,6 +179,7 @@ function stepNaturalCount({
   stateMap,
   now,
   canStartMotion,
+  trendBias,
 }: {
   channelId: string;
   current: number;
@@ -181,6 +189,7 @@ function stepNaturalCount({
   stateMap: Map<string, MotionState>;
   now: number;
   canStartMotion: boolean;
+  trendBias: -1 | 0 | 1;
 }): number {
   const trend = Math.sign(target - polled) as -1 | 0 | 1;
 
@@ -191,7 +200,7 @@ function stepNaturalCount({
   }
 
   if (trend === 0 || target === current) {
-    return stepFlatCount({ current, polled, bucket, state, now, canStartMotion });
+    return stepFlatCount({ current, polled, bucket, state, now, canStartMotion, trendBias });
   }
 
   if (state.direction !== 0 && now > state.activeUntil) {
@@ -442,6 +451,22 @@ export function useInterpolatedSnapshot(
           ? clampToBucket(rawInterpolatedTarget, bucket)
           : rawInterpolatedTarget;
 
+        // Phase B 임시 보정 — 채널별 trend 방향 힌트.
+        // growthRatePerHour는 단위 라운딩으로 0이 되는 경우가 많아 그것만 보면
+        // 정체 채널의 시각적 drift가 좌우 대칭이 되어 우상향/하향이 안 보인다.
+        // rate가 의미 있는 크기로 잡혀 있으면 그 부호를, 아니면 trendBaseline 대비
+        // 현재값의 부호를 보조 신호로 사용한다. Phase C(milestone) 이후 제거 가능.
+        const rate = ch.growthRatePerHour;
+        const trendBaseline = ch.trendBaselineSubscriberCount;
+        const trendBias: -1 | 0 | 1 =
+          rate != null && Math.abs(rate) > 0.5
+            ? (Math.sign(rate) as -1 | 0 | 1)
+            : trendBaseline != null && trendBaseline > 0 && sCurr > trendBaseline
+              ? 1
+              : trendBaseline != null && trendBaseline > 0 && sCurr < trendBaseline
+                ? -1
+                : 0;
+
         const correctionStartForChannel = correctionStartCountsRef.current.get(ch.id);
         let displayCount: number;
         if (correctionProgress < 1 && correctionStartForChannel !== undefined) {
@@ -462,6 +487,7 @@ export function useInterpolatedSnapshot(
             stateMap: motionStatesRef.current,
             now,
             canStartMotion: activeMotionCount < MAX_ACTIVE_MOTIONS && motionGapReady,
+            trendBias,
           });
 
           const stateAfter = motionStatesRef.current.get(ch.id);
