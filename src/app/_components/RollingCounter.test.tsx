@@ -121,4 +121,42 @@ describe('RollingCounter', () => {
     const { container } = render(<RollingCounter value={10000} />);
     expect(container.querySelector('polygon')).toBeNull();
   });
+
+  it('상승 시 column은 위로 슬라이드 (translateY 종료값이 음수)', async () => {
+    vi.useFakeTimers();
+    const { rerender, container } = render(<RollingCounter value={10000} />);
+
+    await act(async () => {
+      rerender(<RollingCounter value={10001} />);
+    });
+    // requestAnimationFrame 콜백이 setOffset(endEm) 호출하도록 한 프레임 진행
+    await advance(50);
+
+    const wheels = Array.from(
+      container.querySelectorAll<HTMLElement>('[style*="transition"]')
+    );
+    const rolling = wheels.filter((w) => w.style.transform && w.style.transform !== 'translateY(0em)');
+    expect(rolling.length).toBeGreaterThan(0);
+    for (const w of rolling) {
+      // 상승 종료 transform = -Xem (음수)
+      expect(w.style.transform).toMatch(/translateY\(-[\d.]+em\)/);
+    }
+  });
+
+  it('하락 시 column은 아래로 슬라이드 (translateY 종료값이 0)', async () => {
+    vi.useFakeTimers();
+    const { rerender, container } = render(<RollingCounter value={10001} />);
+
+    await act(async () => {
+      rerender(<RollingCounter value={10000} />);
+    });
+    await advance(50);
+
+    const wheels = Array.from(
+      container.querySelectorAll<HTMLElement>('[style*="transition"]')
+    );
+    // 하락은 시작 -Xem → 종료 0em. setOffset이 endEm으로 바뀐 뒤 transform = translateY(0em)
+    const ended = wheels.filter((w) => w.style.transform === 'translateY(0em)');
+    expect(ended.length).toBeGreaterThan(0);
+  });
 });

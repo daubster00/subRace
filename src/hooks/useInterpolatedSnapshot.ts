@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { interpolate } from '@/lib/interpolation';
+import { getApiBucket, clampToBucket, type ApiBucket } from '@/lib/api-bucket';
 import type { Channel, SnapshotResponse } from '@/lib/snapshot';
 
 export interface InterpolatedChannel extends Omit<Channel, 'subscriberCount'> {
@@ -59,12 +60,19 @@ function getSignedStep(gap: number): number {
   return Math.sign(gap) * Math.max(1, Math.min(absGap, Math.round(randomBetween(1, ceiling))));
 }
 
-function getFlatDriftAmplitude(count: number): number {
-  if (count >= 50_000_000) return 2_400;
-  if (count >= 10_000_000) return 1_500;
-  if (count >= 5_000_000) return 1_000;
-  if (count >= 1_000_000) return 650;
-  return 260;
+function getFlatDriftAmplitude(count: number, bucket: ApiBucket): number {
+  let base: number;
+  if (count >= 50_000_000) base = 2_400;
+  else if (count >= 10_000_000) base = 1_500;
+  else if (count >= 5_000_000) base = 1_000;
+  else if (count >= 1_000_000) base = 650;
+  else base = 260;
+  // Cap at half the API unit so a symmetric ±amplitude swing centered near the
+  // middle of the bucket stays inside it. Boundary positions still rely on the
+  // explicit clamp in the caller, but capping here keeps targets from being
+  // dragged hard against the floor/ceil on every motion.
+  const halfUnit = Math.floor(bucket.unit / 2);
+  return Math.min(base, halfUnit);
 }
 
 function createMotionState(now: number): MotionState {
@@ -97,12 +105,14 @@ function endMotion(state: MotionState, now: number) {
 function stepFlatCount({
   current,
   polled,
+  bucket,
   state,
   now,
   canStartMotion,
 }: {
   current: number;
   polled: number;
+  bucket: ApiBucket;
   state: MotionState;
   now: number;
   canStartMotion: boolean;
@@ -117,14 +127,14 @@ function stepFlatCount({
       return current;
     }
 
-    const amplitude = getFlatDriftAmplitude(polled);
+    const amplitude = getFlatDriftAmplitude(polled, bucket);
     const distanceFromPolled = current - polled;
     const shouldReturn = Math.abs(distanceFromPolled) > amplitude * 0.65 || Math.random() < 0.38;
     const nextOffset = shouldReturn
       ? randomBetween(-amplitude * 0.18, amplitude * 0.18)
       : randomBetween(-amplitude, amplitude);
 
-    const driftTarget = Math.round(polled + nextOffset);
+    const driftTarget = clampToBucket(Math.round(polled + nextOffset), bucket);
     const direction = Math.sign(driftTarget - current) as -1 | 0 | 1;
     if (direction === 0) {
       state.nextDecisionAt = now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
@@ -158,6 +168,7 @@ function stepNaturalCount({
   current,
   polled,
   target,
+  bucket,
   stateMap,
   now,
   canStartMotion,
@@ -166,6 +177,7 @@ function stepNaturalCount({
   current: number;
   polled: number;
   target: number;
+  bucket: ApiBucket;
   stateMap: Map<string, MotionState>;
   now: number;
   canStartMotion: boolean;
@@ -179,7 +191,7 @@ function stepNaturalCount({
   }
 
   if (trend === 0 || target === current) {
-    return stepFlatCount({ current, polled, state, now, canStartMotion });
+    return stepFlatCount({ current, polled, bucket, state, now, canStartMotion });
   }
 
   if (state.direction !== 0 && now > state.activeUntil) {
@@ -200,12 +212,13 @@ function stepNaturalCount({
 
     if (shouldCorrect) {
       const correctionDirection = (-trend) as -1 | 1;
-      const correctionTarget = trend > 0
+      const rawCorrection = trend > 0
         ? Math.max(polled, current - Math.max(1, Math.round(randomBetween(2, 12))))
         : Math.min(polled, current + Math.max(1, Math.round(randomBetween(2, 12))));
+      const correctionTarget = clampToBucket(rawCorrection, bucket);
       startMotion(state, now, correctionDirection, correctionTarget);
     } else if (shouldMove) {
-      startMotion(state, now, trend as -1 | 1, target);
+      startMotion(state, now, trend as -1 | 1, clampToBucket(target, bucket));
     } else {
       state.nextDecisionAt = now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
     }
@@ -413,12 +426,21 @@ export function useInterpolatedSnapshot(
         const sCurr = currCountsRef.current.get(ch.id) ?? ch.subscriberCount;
         const previousDisplay = displayCountsRef.current.get(ch.id) ?? sCurr;
 
+        // The API unit bucket is anchored to the latest polled value, not the
+        // currently drifting display value. Otherwise a display that drifted
+        // up into the next bucket would re-anchor and never come back, even
+        // though the underlying polled value never crossed the boundary.
+        const bucket = sCurr > 0 ? getApiBucket(sCurr) : null;
+
         const arrivedAt = snapshotArrivedAtRef.current.get(ch.id) ?? now;
         const elapsedSeconds = (now - arrivedAt) / 1000;
 
-        const interpolatedTarget = Math.round(
+        const rawInterpolatedTarget = Math.round(
           interpolate({ sPrev, sCurr, tInterval, t: elapsedSeconds, safetyRatio })
         );
+        const interpolatedTarget = bucket
+          ? clampToBucket(rawInterpolatedTarget, bucket)
+          : rawInterpolatedTarget;
 
         const correctionStartForChannel = correctionStartCountsRef.current.get(ch.id);
         let displayCount: number;
@@ -427,7 +449,7 @@ export function useInterpolatedSnapshot(
             correctionStartForChannel + (interpolatedTarget - correctionStartForChannel) * correctionFactor
           );
           motionStatesRef.current.delete(ch.id);
-        } else {
+        } else if (bucket) {
           const stateBefore = motionStatesRef.current.get(ch.id);
           const wasActiveBefore = (stateBefore?.activeUntil ?? 0) > now && (stateBefore?.direction ?? 0) !== 0;
 
@@ -436,6 +458,7 @@ export function useInterpolatedSnapshot(
             current: previousDisplay,
             polled: sCurr,
             target: interpolatedTarget,
+            bucket,
             stateMap: motionStatesRef.current,
             now,
             canStartMotion: activeMotionCount < MAX_ACTIVE_MOTIONS && motionGapReady,
@@ -449,6 +472,15 @@ export function useInterpolatedSnapshot(
             newMotionGapRef.current = randomBetween(MIN_NEW_MOTION_GAP_MS, MAX_NEW_MOTION_GAP_MS);
             motionGapReady = false;
           }
+        } else {
+          displayCount = previousDisplay;
+        }
+
+        // Final safety net — every code path above already respects the
+        // bucket, but a drifted previousDisplay carried over from a poll that
+        // crossed a bucket boundary could still be out of range on first tick.
+        if (bucket) {
+          displayCount = clampToBucket(displayCount, bucket);
         }
 
         const motionState = motionStatesRef.current.get(ch.id);

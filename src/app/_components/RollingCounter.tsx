@@ -30,15 +30,19 @@ function isDigit(char: string): boolean {
   return /\d/.test(char);
 }
 
-function getDigitSequence(from: string, to: string, direction: -1 | 1): string[] {
-  if (from === to) return [to];
+// Always builds [low, low+1, ..., high] (wrapping through 9→0 if needed),
+// regardless of which direction the counter is rolling. DigitWheel inverts the
+// transform start/end based on direction so the same column can scroll either
+// up (rising) or down (falling) without rebuilding the sequence.
+function getDigitSequence(low: string, high: string): string[] {
+  if (low === high) return [high];
 
-  const sequence = [from];
-  let current = Number(from);
-  const target = Number(to);
+  const sequence = [low];
+  let current = Number(low);
+  const target = Number(high);
 
   while (current !== target && sequence.length <= 11) {
-    current = (current + direction + 10) % 10;
+    current = (current + 1) % 10;
     sequence.push(String(current));
   }
 
@@ -61,22 +65,31 @@ interface DigitWheelProps {
 
 function DigitWheel({ digit, previousDigit, direction, delay }: DigitWheelProps) {
   const canRoll = isDigit(previousDigit) && previousDigit !== digit;
+  // Column is always ordered [curr, ..., prev] for falling and [prev, ..., curr]
+  // for rising — i.e. low-to-high through whichever path was taken (incl. wrap).
+  // The transform then slides the column up (rising) or down (falling) so the
+  // viewer sees new digits enter from the bottom on rise and from the top on
+  // fall.
   const sequence = canRoll
-    ? getDigitSequence(previousDigit, digit, direction)
+    ? direction === 1
+      ? getDigitSequence(previousDigit, digit)
+      : getDigitSequence(digit, previousDigit)
     : [digit];
-  const distance = `${-(sequence.length - 1) * 1.25}em`;
+  const span = (sequence.length - 1) * 1.25;
   const duration = getWheelDuration(sequence.length);
-  const [offset, setOffset] = useState('0');
+  const startEm = direction === 1 ? 0 : -span;
+  const endEm = direction === 1 ? -span : 0;
+  const [offset, setOffset] = useState(`${startEm}em`);
 
   useEffect(() => {
     if (!canRoll) return;
 
     const frame = requestAnimationFrame(() => {
-      setOffset(distance);
+      setOffset(`${endEm}em`);
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [canRoll, distance]);
+  }, [canRoll, endEm]);
 
   return (
     <span
