@@ -5,6 +5,7 @@ import { pollYutura } from './yutura';
 import { pollYoutubeChannels } from './youtube-channels';
 import { startLivePoller } from './youtube-live';
 import { pollYoutubeLikes } from './youtube-likes';
+import { startRetentionScheduler } from './retention';
 
 function getLastSuccessAt(table: 'yutura_pulls' | 'youtube_polls'): Date | null {
   const col = table === 'yutura_pulls' ? 'pulled_at' : 'polled_at';
@@ -95,6 +96,7 @@ export function startScheduler(): void {
   }, 60_000);
 
   startLivePoller();
+  startRetentionScheduler();
 }
 
 // Exposed so the settings reload path can force a likes refresh immediately

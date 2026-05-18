@@ -91,13 +91,28 @@ Phase A의 bucket clamp는 "단위 벗어나지 않음"을 보장했지만, grow
 - 6h `subscriber_snapshots`는 유지
 - 일별 집계 테이블 `subscriber_daily` 추가 검토 (Phase C 진행 중 데이터 양 보고 결정)
 
-### ⏭️ Phase E — TOP150 이탈 채널 90일 유지 (#8)
+### ✅ Phase E — TOP150 이탈 채널 90일 유지 (완료: 2026-05-18)
 
-- 마이그레이션: `channels.inactive_since TEXT` 컬럼 추가
-- 정책: **2026-05-18 이후 새로 inactive 되는 채널만** `inactive_since = NOW()` 기록 (기존 inactive 채널은 오늘부터 카운트 시작)
-- 90일 retention cron: `inactive_since < now() - 90d` 채널 archive 처리
-- 재진입 시 `is_active=1` 복귀 + `inactive_since` clear
-- [worker/yutura.ts:427](../../worker/yutura.ts) — `UPDATE channels SET is_active = 0`을 새 정책으로 교체
+**완료 내역**:
+- 신규 [migrations/004_inactive_since.sql](../../migrations/004_inactive_since.sql)
+  - `channels.inactive_since TEXT` 컬럼 추가
+  - 마이그레이션 적용 시점에 이미 `is_active=0`인 채널들은 `inactive_since = NOW()`로 박음 → "오늘부터 카운트 시작"
+  - `idx_channels_inactive_since` 인덱스 추가
+- 수정 [worker/yutura.ts](../../worker/yutura.ts):
+  - upsert에 `inactive_since = NULL` 추가 → 재진입 시 카운트 리셋
+  - sweep을 `inactive_since = COALESCE(inactive_since, NOW)`로 — 처음 빠지는 채널만 timestamp 박고, 이미 inactive인 채널의 90일 카운트는 보존
+- 신규 [worker/retention.ts](../../worker/retention.ts):
+  - `runRetentionSweep()`: `is_active=0 AND inactive_since < NOW-90d` 채널 선별 후 `subscriber_snapshots → channels` 순으로 트랜잭션 DELETE
+  - `startRetentionScheduler()`: 워커 시작 시 1회 + 24h 주기
+- 수정 [worker/scheduler.ts](../../worker/scheduler.ts): `startScheduler` 마지막에 `startRetentionScheduler()` 호출
+
+**검증**:
+- ✓ vitest 39 통과
+- ✓ `tsc --noEmit` 클린
+- ✓ `next build` 성공
+- ✓ Docker 재기동 후 `migration_applied file=004_inactive_since.sql` 로그 확인
+- ✓ DB 확인: active 150 / inactive 1 / inactive_since=NULL인 inactive 채널 0개 (정책 의도대로)
+- ✓ retention sweep은 90일 전 채널이 없어 0건 정리 (정상)
 
 ---
 

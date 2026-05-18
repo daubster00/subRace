@@ -397,15 +397,18 @@ export async function pollYutura(): Promise<void> {
 
     const now = new Date().toISOString();
 
+    // 재진입 시 inactive_since를 NULL로 clear — 다시 빠지더라도 그날부터
+    // 새로 90일 카운트가 시작된다.
     const upsert = db.prepare(`
-      INSERT INTO channels (id, source_id, handle, name, thumbnail_url, is_active, first_seen_at, last_seen_at)
-      VALUES (?, ?, NULL, ?, ?, 1, ?, ?)
+      INSERT INTO channels (id, source_id, handle, name, thumbnail_url, is_active, inactive_since, first_seen_at, last_seen_at)
+      VALUES (?, ?, NULL, ?, ?, 1, NULL, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        source_id     = excluded.source_id,
-        name          = excluded.name,
-        thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
-        is_active     = 1,
-        last_seen_at  = excluded.last_seen_at
+        source_id      = excluded.source_id,
+        name           = excluded.name,
+        thumbnail_url  = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
+        is_active      = 1,
+        inactive_since = NULL,
+        last_seen_at   = excluded.last_seen_at
     `);
 
     const upsertMany = db.transaction((chs: ResolvedChannel[]) => {
@@ -422,9 +425,16 @@ export async function pollYutura(): Promise<void> {
     });
     upsertMany(resolved);
 
+    // TOP150에서 빠진 채널: 이미 inactive면 기존 inactive_since를 유지하고
+    // (이번 sweep으로 90일 카운트가 리셋되지 않도록), 처음 빠지는 채널만 NOW를 박는다.
     const activeIds = resolved.map((c) => c.youtubeChannelId);
     const placeholders = activeIds.map(() => '?').join(',');
-    db.prepare(`UPDATE channels SET is_active = 0 WHERE id NOT IN (${placeholders})`).run(...activeIds);
+    db.prepare(`
+      UPDATE channels
+      SET is_active = 0,
+          inactive_since = COALESCE(inactive_since, ?)
+      WHERE id NOT IN (${placeholders})
+    `).run(now, ...activeIds);
 
     const durationMs = Date.now() - new Date(startedAt).getTime();
     console.log(
