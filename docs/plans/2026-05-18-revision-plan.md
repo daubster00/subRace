@@ -46,45 +46,40 @@
 - ✓ `next build` 성공
 - ⏳ **사용자 시각 검증 대기 중** — 배포 후 1억대/1천만대/100만대 채널 각각 단위 범위 내에서만 움직이는지, 하락 시 새 숫자가 위에서 내려오는지 확인
 
-### ✅ Phase B — 우상향 채널 정체 문제 (#3 임시 보정, 완료: 2026-05-18)
+### ✅ Phase B — 우상향 채널 정체 문제 (#3 임시 보정 → Phase C 완료로 제거됨: 2026-05-18)
 
-Phase A의 bucket clamp는 "단위 벗어나지 않음"을 보장했지만, growthRate가 단위 라운딩 때문에 0으로 잡혀 정체로 보이는 근본 원인은 Phase C(milestone)에서 해결. 그 전까지의 임시 보정 완료.
+Phase A의 bucket clamp는 "단위 벗어나지 않음"을 보장했지만 growthRate가 단위 라운딩 때문에 0으로 잡혀 정체로 보이는 근본 원인은 Phase C(milestone)에서 해결. Phase B는 그 전까지의 임시 보정이었고, **Phase C 완료와 함께 제거됨** ([useInterpolatedSnapshot.ts](../../src/hooks/useInterpolatedSnapshot.ts)의 `trendBias`/비대칭 amplitude 분기 삭제).
+
+이제 milestone 기반 정확한 rate가 들어오므로 flat drift는 다시 대칭 amplitude로 복원되어 있다.
+
+### ✅ Phase C — 60일 milestone 데이터 수집 (#5, #6, #7, 완료: 2026-05-18)
+
+**소스 결정**: yutura 채널 상세 페이지의 `/channel/{yuturaId}/chart/` (`<section class="count-table">`)를 사용. 사용자 직접 확인 결과 30일 일별 데이터 (날짜, 구독자수, 영상수, 조회수). 60일은 yutura에서 직접 받을 수 없어 다음 두 가지로 보강:
+1. 매일 chart를 폴링해 자체 누적 → 시간 지나면 30일을 초과한 일별 데이터 자체 보유
+2. 월별 ranking 백필 (기존 `backfillYuturaMonthlySnapshots`)을 ~60일 전 월에 대해 30일 cadence로 실행 → 단일 데이터 포인트 fallback
 
 **완료 내역**:
-- [src/hooks/useInterpolatedSnapshot.ts](../../src/hooks/useInterpolatedSnapshot.ts):
-  - tick 안에서 채널별 `trendBias: -1 | 0 | 1` 계산
-    - 1차: `growthRatePerHour`의 부호 (단, `|rate| > 0.5` 일 때만)
-    - 2차 fallback: `trendBaselineSubscriberCount` 대비 현재 sCurr 부호
-  - `stepFlatCount` 인자에 `trendBias` 추가
-    - amplitude를 비대칭으로: 우상향이면 위로 `amplitude`, 아래로 `amplitude * 0.4`
-    - 우하향은 그 반대. trendBias=0 채널은 기존 대칭 동작 유지
-  - `stepNaturalCount`도 `trendBias`를 받아 flat 분기에 그대로 전달
-
-**효과**:
-- ISSEI / Akira처럼 polled 값이 단위 라운딩으로 정체된 채널 → flat 모드 진입 시 trendBaseline 부호로 위쪽 drift가 더 빈번하고 멀리 — 시각적으로 우상향 인식
-- bucket clamp는 그대로 작동해 단위 범위 이탈 없음
-- trendBias=0인 채널(신규 채널 / 진짜 정체)은 기존 동작 유지
+- 신규 마이그레이션 [migrations/005_chart_pulls.sql](../../migrations/005_chart_pulls.sql) — `chart_pulls` 로그 테이블 (kind = 'chart' | 'monthly_backfill')
+- 신규 fetcher 모듈 [worker/yutura-fetch.ts](../../worker/yutura-fetch.ts) — yutura.ts에서 분리한 Cloudflare bypass / curl-impersonate / FlareSolverr 헬퍼 (yutura.ts와 yutura-chart.ts 공유)
+- 신규 파서 [src/lib/yutura-chart-parser.ts](../../src/lib/yutura-chart-parser.ts) — count-table → `{ date, subscriberCount, videoCount, viewCount }[]` (7 vitest 케이스, sample HTML 검증)
+- 신규 워커 [worker/yutura-chart.ts](../../worker/yutura-chart.ts):
+  - `pollYuturaChartHistory()` — 활성 채널 N개 sweep, `INSERT … ON CONFLICT … DO UPDATE`로 `subscriber_snapshots` 머지
+  - `backfillSixtyDaySnapshots()` — `backfillYuturaMonthlySnapshots` 래퍼, 자동으로 현재 월에서 -2개월 month 계산
+- 스케줄러 [worker/scheduler.ts](../../worker/scheduler.ts) — chart (24h cadence) + monthly_backfill (720h = 30일 cadence) 추가, single-flight + 60s tick
+- env [src/lib/env.ts](../../src/lib/env.ts) — `YUTURA_CHART_INTERVAL_HOURS=24`, `YUTURA_MONTHLY_BACKFILL_INTERVAL_HOURS=720`
+- [src/lib/snapshot.ts](../../src/lib/snapshot.ts) baseline SQL 교체:
+  - 1차: 30일+ 떨어진 행 중 현재와 카운트가 다른 가장 최근 행 (활성 채널의 transition 잡음)
+  - 2차: 60일+ 떨어진 가장 최근 행 (1차 NULL = 30일 정체 채널의 60일 baseline)
+  - 3차: 가장 오래된 행 (60일치 데이터 없는 신규 채널)
+- Phase B 제거: [src/hooks/useInterpolatedSnapshot.ts](../../src/hooks/useInterpolatedSnapshot.ts)의 `trendBias` 인자, 비대칭 `upperReach/lowerReach` 분기, 호출부 trendBias 계산 모두 삭제
 
 **검증**:
-- ✓ vitest 39 통과 (영향 없는 hook 변경)
+- ✓ vitest 46 통과 (chart parser 7개 추가)
 - ✓ `tsc --noEmit` 클린
 - ✓ `next build` 성공
-- ⏳ 사용자 시각 검증 대기 — 정체로 보이던 채널이 우상향으로 보이는지
+- ⏳ 배포 후 검증: chart_pulls 테이블에 'chart' 잡 row가 생기는지, subscriber_snapshots에 일별 행이 누적되는지, ~24h 후 stagnant 채널의 growthRate가 더 이상 NULL/0이 아닌지
 
-**Phase C 이후 제거 항목**: `trendBias` 인자, 비대칭 `upperReach/lowerReach` 분기. milestone 기반 정확한 rate가 들어오면 단위 라운딩 문제가 사라지므로 대칭 amplitude로 복원.
-
-### ⏭️ Phase C — 60일 milestone 데이터 수집 (#5, #6, #7)
-
-**선결 조건 (사용자 액션 대기)**: yutura의 어떤 페이지에서 채널별 60일 milestone(=API 단위 변화 시점) 데이터를 얻을 수 있는지 사용자가 직접 확인 후 알려주기로 함.
-
-선택지:
-- (a) yutura 채널 상세 페이지 `/channel/{yuturaId}/`에 일별/주별 히스토리 그래프 또는 milestone 표기가 있는 경우 → 그것을 파싱
-- (b) (a)가 없으면 차선: 기존 [`backfillYuturaMonthlySnapshots`](../../worker/yutura.ts) 함수를 60일 전 / 30일 전 / 현재 시점으로 2~3회 돌려서 그 차이를 milestone 변화량으로 사용 (정확도 낮음)
-
-확정 후 작업:
-- 마이그레이션: `subscriber_milestones (channel_id, milestone_value, observed_at, source)` 신규
-- 워커: 새 잡 추가 (별도 cadence, 예: 1일 1회)
-- [src/lib/snapshot.ts](../../src/lib/snapshot.ts)의 `growthRatePerHour` SQL을 milestone 기반으로 교체
+**향후 (#6 SocialBlade)**: 고객 별도 결제 후 추가 데이터 소스로 통합 예정. 현재 코드에는 자리 만들어두지 않음.
 
 ### ⏭️ Phase D — 데이터 기록 구조 (#4)
 
@@ -118,16 +113,15 @@ Phase A의 bucket clamp는 "단위 벗어나지 않음"을 보장했지만, grow
 
 ## 2. 미결 사항 (open questions)
 
-- **yutura 60일 milestone 소스**: 사용자가 직접 yutura 페이지 확인 후 알려주기로 함 — Phase C 착수 전 필수
-- yutura가 적합한 페이지를 제공하지 않으면 Phase C는 (b) 경로(월별 백필 차이)로 갈지, 다른 외부 소스 후보를 다시 논의할지 결정 필요
+- **Phase D (#4 데이터 기록 구조)**: 현재 6h `subscriber_snapshots`에 chart 일별 행이 함께 들어가는 구조로 단일화됨. 별도 `subscriber_daily` 집계 테이블이 필요한지는 데이터 양 보고 결정. 당장 미착수.
+- **#6 SocialBlade 통합**: 고객 별도 결제 후 진행. 현재 코드에는 자리 없음.
 
 ---
 
 ## 3. 다음 세션이 시작할 때 할 것
 
 1. 이 문서를 읽는다
-2. 사용자가 Phase A 시각 검증을 마쳤는지 확인 (배포된 화면에서 단위 범위 / 방향 OK인지)
-3. OK면 Phase B 또는 Phase C 진행 (yutura 조사 결과 들어왔는지에 따라)
-4. NG면 Phase A 보완 후 Phase B로
+2. 배포 후 검증 결과 확인 — `chart_pulls` row 생성, `subscriber_snapshots` 일별 행 누적, stagnant 채널 growthRate가 NULL/0이 아닌지
+3. Phase D 필요성 판단 또는 SocialBlade 결제 진행 상태 확인
 
-git log에서 `Phase A` 키워드로 변경 내역 확인 가능.
+git log에서 `Phase A`, `Phase C`, `Phase E` 키워드로 변경 내역 확인 가능.

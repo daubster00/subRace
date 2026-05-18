@@ -106,14 +106,35 @@ export function readSnapshot(): SnapshotResponse {
         ORDER  BY ss_prev.polled_at DESC
         LIMIT  1
       ) AS previous_subscriber_count,
+      -- Phase C: 30-day-active 우선, 30일 정체면 60일 baseline.
+      --
+      -- 1차) 30일 이상 떨어진 스냅샷 중 현재와 카운트가 다른 가장 최근 행.
+      --      현재가 3.24M인데 35일 전이 3.23M이면 채널은 그동안 transition을
+      --      한 번 했고, growthRate는 +10k / 35d 로 정확하게 잡힌다.
+      -- 2차) 60일 이상 떨어진 가장 최근 행. 1차가 NULL = 30일 내내 같은 카운트.
+      --      더 멀리 보면 직전 transition을 잡을 수 있다. 이게 사용자가 요구한
+      --      "30일 안에 변화가 없는 채널이 있다면 60일 이전 구독자 수" 분기.
+      -- 3차) 가장 오래된 스냅샷 (60일치 데이터가 아직 없는 신규 채널).
+      --
+      -- 세 분기의 WHERE/ORDER는 _count와 _at subquery가 동일해 같은 행을 선택.
       COALESCE(
         (
-          SELECT ss_month.subscriber_count
-          FROM   subscriber_snapshots ss_month
-          WHERE  ss_month.channel_id = c.id
+          SELECT ss_t.subscriber_count
+          FROM   subscriber_snapshots ss_t
+          WHERE  ss_t.channel_id = c.id
             AND  s.polled_at IS NOT NULL
-            AND  julianday(s.polled_at) - julianday(ss_month.polled_at) >= 30.0
-          ORDER  BY ss_month.polled_at DESC
+            AND  julianday(s.polled_at) - julianday(ss_t.polled_at) >= 30.0
+            AND  ss_t.subscriber_count != s.subscriber_count
+          ORDER  BY ss_t.polled_at DESC
+          LIMIT  1
+        ),
+        (
+          SELECT ss_60.subscriber_count
+          FROM   subscriber_snapshots ss_60
+          WHERE  ss_60.channel_id = c.id
+            AND  s.polled_at IS NOT NULL
+            AND  julianday(s.polled_at) - julianday(ss_60.polled_at) >= 60.0
+          ORDER  BY ss_60.polled_at DESC
           LIMIT  1
         ),
         (
@@ -128,12 +149,22 @@ export function readSnapshot(): SnapshotResponse {
       ) AS trend_baseline_count,
       COALESCE(
         (
-          SELECT ss_month.polled_at
-          FROM   subscriber_snapshots ss_month
-          WHERE  ss_month.channel_id = c.id
+          SELECT ss_t.polled_at
+          FROM   subscriber_snapshots ss_t
+          WHERE  ss_t.channel_id = c.id
             AND  s.polled_at IS NOT NULL
-            AND  julianday(s.polled_at) - julianday(ss_month.polled_at) >= 30.0
-          ORDER  BY ss_month.polled_at DESC
+            AND  julianday(s.polled_at) - julianday(ss_t.polled_at) >= 30.0
+            AND  ss_t.subscriber_count != s.subscriber_count
+          ORDER  BY ss_t.polled_at DESC
+          LIMIT  1
+        ),
+        (
+          SELECT ss_60.polled_at
+          FROM   subscriber_snapshots ss_60
+          WHERE  ss_60.channel_id = c.id
+            AND  s.polled_at IS NOT NULL
+            AND  julianday(s.polled_at) - julianday(ss_60.polled_at) >= 60.0
+          ORDER  BY ss_60.polled_at DESC
           LIMIT  1
         ),
         (

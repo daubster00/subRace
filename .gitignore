@@ -49,6 +49,9 @@ next-env.d.ts
 data/*
 !data/.gitkeep
 
+# Dev-only docker compose override (host bind mount for `npm run dev` setup)
+docker-compose.override.yml
+
 # runtime logs
 *.log
 

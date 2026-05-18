@@ -11,6 +11,13 @@ const envSchema = z.object({
   BACKGROUND_LIMIT: z.coerce.number().int().min(1).default(150),
   YUTURA_INTERVAL_HOURS: z.coerce.number().int().min(1).default(48),
   YUTURA_REQUEST_DELAY_MS: z.coerce.number().int().min(0).default(1500),
+  // Per-channel chart polling (≈ N(active) HTTP requests per sweep). Used to
+  // populate subscriber_snapshots with 30-day daily milestone data and is the
+  // primary input for the Phase C trend_baseline calculation.
+  YUTURA_CHART_INTERVAL_HOURS: z.coerce.number().min(1).default(24),
+  // Monthly ranking backfill from ~60 days ago. Fills the snapshot rows that
+  // the "stagnant channel" fallback in snapshot.ts depends on.
+  YUTURA_MONTHLY_BACKFILL_INTERVAL_HOURS: z.coerce.number().min(1).default(720),
   // Fractional values allowed so we can dial polling down to minutes for testing.
   // Floor of 0.01h (~36s) keeps anyone from accidentally hammering the YouTube API.
   // YOUTUBE_POLL_INTERVAL_HOURS now controls ONLY the 150-channel ranking poll
