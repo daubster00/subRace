@@ -54,6 +54,17 @@ const OSCILLATION_AMPLITUDE_RATIO = 0.10;
 // phase가 일관되게 결정됨.
 const OSCILLATION_PERIOD_SECONDS = 600;
 
+// rate=null/0인 채널에 부여할 최소 성장률.
+//
+// 의미: 60일 milestone과 현재 폴링값이 같은 API bucket인 경우, 채널이 60일
+// 동안 [0, bucket.unit) 사이로 늘었지만 정확한 값을 모름. 평균을 잡으면
+// bucket.unit × 0.5. 그래서 시간당 rate ≈ bucket.unit / (60일 × 24h) / 2
+// = bucket.unit / 2880.
+//
+// 이건 측정 불가능한 채널이 화면에서 완전히 정지해 보이는 걸 막는 임시 가정.
+// 시간이 지나 60일 milestone에 실제 데이터가 쌓이면 자연스럽게 진짜 rate로 대체됨.
+const STAGNANT_RATE_DIVISOR = 60 * 24 * 2;
+
 // 폴링 간격에 의존하지 않는 마일스톤 기반 추정값.
 //
 // 양의 성장 채널 예시 (ISSEI 75.4M, rate=1916/h):
@@ -68,18 +79,21 @@ export function estimateSubscriberCount({
   elapsedSeconds,
   safetyRatio,
 }: EstimateParams): number {
-  if (
-    polledCount <= 0 ||
-    growthRatePerHour == null ||
-    growthRatePerHour === 0 ||
-    elapsedSeconds <= 0
-  ) {
+  if (polledCount <= 0 || elapsedSeconds <= 0) {
     return polledCount;
   }
 
   const bucket = getApiBucket(polledCount);
-  const ratePerSecond = growthRatePerHour / 3600;
-  const direction = growthRatePerHour > 0 ? 1 : -1;
+
+  // 측정 불가 채널(신규 / 60일 정체)에는 bucket 기반 minimum rate 적용 →
+  // 화면에서 완전히 멈춰 보이지 않게 한다. 명시적 음수 rate는 그대로 사용
+  // (실제 감소 채널).
+  const effectiveRate = growthRatePerHour == null || growthRatePerHour === 0
+    ? bucket.unit / STAGNANT_RATE_DIVISOR
+    : growthRatePerHour;
+
+  const ratePerSecond = effectiveRate / 3600;
+  const direction = effectiveRate > 0 ? 1 : -1;
 
   // cap 위치는 bucket 안 절대 좌표. polledCount가 bucket 어디에 있든
   // 일관되게 결정됨.

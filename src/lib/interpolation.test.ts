@@ -26,24 +26,43 @@ describe('interpolate (legacy)', () => {
 });
 
 describe('estimateSubscriberCount (마일스톤 기반)', () => {
-  it('성장률 null이면 폴링값 그대로 (신규 채널)', () => {
+  it('성장률 null인 신규 채널도 minimum rate로 미세 증가', () => {
+    // 1만 unit bucket: minimum rate = 10_000 / 2880 ≈ 3.47/h
+    // 1시간 경과 → +3~4 (round)
     const r = estimateSubscriberCount({
       polledCount: 5_300_000,
       growthRatePerHour: null,
       elapsedSeconds: 3600,
       safetyRatio: SAFETY,
     });
-    expect(r).toBe(5_300_000);
+    expect(r).toBeGreaterThan(5_300_000);
+    expect(r).toBeLessThan(5_300_010);
   });
 
-  it('성장률 0이면 폴링값 그대로 (정체 채널)', () => {
+  it('성장률 0인 정체 채널도 minimum rate로 미세 증가', () => {
+    // 1만 unit bucket: minimum rate = 10_000 / 2880 ≈ 3.47/h
+    // 24시간 경과 → +83 (round)
     const r = estimateSubscriberCount({
       polledCount: 5_300_000,
+      growthRatePerHour: 0,
+      elapsedSeconds: 24 * 3600,
+      safetyRatio: SAFETY,
+    });
+    expect(r).toBeGreaterThan(5_300_000);
+    expect(r).toBeLessThanOrEqual(5_300_100);
+  });
+
+  it('100만 unit 채널의 minimum rate ≈ 347/h', () => {
+    // 1억대 100만 unit bucket: minimum rate = 1_000_000 / 2880 ≈ 347.2/h
+    // 1시간 경과 → +347 (round)
+    const r = estimateSubscriberCount({
+      polledCount: 123_000_000,
       growthRatePerHour: 0,
       elapsedSeconds: 3600,
       safetyRatio: SAFETY,
     });
-    expect(r).toBe(5_300_000);
+    expect(r).toBeGreaterThan(123_000_340);
+    expect(r).toBeLessThan(123_000_360);
   });
 
   it('경과 0이면 폴링값 그대로 (방금 폴링됨)', () => {
