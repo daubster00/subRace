@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import db from '@/lib/db';
 import { env } from '@/lib/env';
+import { estimateSubscriberCount } from '@/lib/interpolation';
 
 // ---------- Zod 응답 스키마 (AC3) ----------
 
@@ -15,6 +16,11 @@ const ChannelSchema = z.object({
   name:            z.string(),
   thumbnailUrl:    z.string().nullable(),
   subscriberCount: z.number().int(),
+  // Forward-projected count "as of serverTime" using growthRatePerHour and
+  // ESTIMATION_SAFETY_RATIO — same formula the client interpolation hook uses.
+  // Lets the first paint (SSR / cold tab) start at a natural drifted value
+  // instead of snapping to the stale polled value.
+  estimatedSubscriberCount: z.number().int(),
   previousSubscriberCount: z.number().int().nullable(),
   videoCount:      z.number().int().nullable(),
   viewCount:       z.number().int().nullable(),
@@ -202,6 +208,9 @@ export function readSnapshot(): SnapshotResponse {
     LIMIT ?
   `).all(env.SURGE_WINDOW_HOURS / 24, env.DISPLAY_LIMIT) as ChannelRow[];
 
+  const nowMs = Date.now();
+  const safetyRatio = env.ESTIMATION_SAFETY_RATIO;
+
   const channels: Channel[] = channelRows.map((row, i) => {
     const baseline = row.surge_baseline_count;
     const surgeDelta = baseline != null && baseline > 0
@@ -223,12 +232,26 @@ export function readSnapshot(): SnapshotResponse {
       ? trendDelta / trendHours
       : null;
 
+    // Milestone-based projection: rate × elapsedSeconds 누적, 다음 API bucket
+    // 경계의 safetyRatio 위치를 cap으로 잡고, cap 도달 후엔 그 부근에서 sin
+    // 곡선으로 oscillation. 폴링 간격(YOUTUBE_POLL_INTERVAL_HOURS) 무관.
+    const elapsedSeconds = row.polled_at
+      ? Math.max(0, (nowMs - new Date(row.polled_at).getTime()) / 1000)
+      : 0;
+    const estimatedSubscriberCount = estimateSubscriberCount({
+      polledCount: row.subscriber_count,
+      growthRatePerHour,
+      elapsedSeconds,
+      safetyRatio,
+    });
+
     return {
       id:              row.id,
       handle:          row.handle,
       name:            row.name,
       thumbnailUrl:    row.thumbnail_url,
       subscriberCount: row.subscriber_count,
+      estimatedSubscriberCount,
       previousSubscriberCount: row.previous_subscriber_count ?? null,
       videoCount:      row.video_count ?? null,
       viewCount:       row.view_count ?? null,

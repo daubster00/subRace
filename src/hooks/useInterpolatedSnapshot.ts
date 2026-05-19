@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { interpolate } from '@/lib/interpolation';
+import { estimateSubscriberCount } from '@/lib/interpolation';
 import { getApiBucket, clampToBucket, type ApiBucket } from '@/lib/api-bucket';
 import type { Channel, SnapshotResponse } from '@/lib/snapshot';
 
@@ -293,10 +293,11 @@ function persistDisplayCounts(counts: Map<string, number>, now: number): void {
 
 export function useInterpolatedSnapshot(
   data: SnapshotResponse | undefined,
-  pollIntervalHours: number,
+  // 폴링 간격은 더 이상 추정/보간 cap에 쓰이지 않는다 (마일스톤 기반으로 전환됨).
+  // 시그니처는 Dashboard 호출부 호환을 위해 유지.
+  _pollIntervalHours: number,
   safetyRatio: number,
 ): InterpolatedChannel[] {
-  const prevCountsRef = useRef<Map<string, number>>(new Map());
   const currCountsRef = useRef<Map<string, number>>(new Map());
   // Per-channel arrival time. YouTube's subscriberCount is rounded to 3 sig
   // figs for large channels, so many consecutive polls return an identical
@@ -319,12 +320,25 @@ export function useInterpolatedSnapshot(
 
   // Hydrate drifted counts from localStorage on first render so a page reload
   // (including the settings-save reload) preserves the last interpolated values.
+  // When localStorage is empty (cold tab, incognito, >24h absence), seed from
+  // the server-projected estimatedSubscriberCount so the first tick starts at a
+  // natural drifted value instead of snapping back to the raw polled count.
   const hydratedRef = useRef(false);
-  if (!hydratedRef.current) {
+  if (!hydratedRef.current && data && data.channels.length > 0) {
     hydratedRef.current = true;
     const persisted = loadPersistedDisplayCounts();
     if (persisted.size > 0) {
       displayCountsRef.current = persisted;
+    } else {
+      const seeded = new Map<string, number>();
+      for (const ch of data.channels) {
+        if (ch.estimatedSubscriberCount > 0) {
+          seeded.set(ch.id, ch.estimatedSubscriberCount);
+        }
+      }
+      if (seeded.size > 0) {
+        displayCountsRef.current = seeded;
+      }
     }
   }
 
@@ -335,18 +349,6 @@ export function useInterpolatedSnapshot(
 
     const incomingCounts = new Map(
       data.channels.map((ch) => [ch.id, ch.subscriberCount])
-    );
-    const incomingPreviousCounts = new Map(
-      data.channels.map((ch) => {
-        const rate = ch.growthRatePerHour;
-        const trendPrevious = rate != null
-          ? Math.max(1, Math.round(ch.subscriberCount - rate * pollIntervalHours))
-          : null;
-        const fallbackPrevious = ch.previousSubscriberCount != null && ch.previousSubscriberCount > 0
-          ? ch.previousSubscriberCount
-          : null;
-        return [ch.id, trendPrevious ?? fallbackPrevious] as const;
-      }).filter((entry): entry is readonly [string, number] => entry[1] != null)
     );
 
     const isFirstLoad = currCountsRef.current.size === 0;
@@ -371,7 +373,6 @@ export function useInterpolatedSnapshot(
       }
     }
 
-    prevCountsRef.current = incomingPreviousCounts;
     currCountsRef.current = incomingCounts;
 
     if (isFirstLoad) {
@@ -390,12 +391,10 @@ export function useInterpolatedSnapshot(
     }
 
     latestChannelsRef.current = data.channels;
-  }, [data, pollIntervalHours]);
+  }, [data]);
 
   useEffect(() => {
     if (!data) return;
-
-    const tInterval = pollIntervalHours * 3600;
 
     function tick() {
       const now = Date.now();
@@ -420,27 +419,23 @@ export function useInterpolatedSnapshot(
         || (now - lastMotionStartedAtRef.current) >= newMotionGapRef.current;
 
       const result: InterpolatedChannel[] = latestChannelsRef.current.map((ch) => {
-        // 0은 "데이터 없음"(COALESCE 기본값)이므로 null과 동일하게 처리 — 보간 없음
-        const sPrevRaw = prevCountsRef.current.get(ch.id);
-        const sPrev = sPrevRaw != null && sPrevRaw > 0 ? sPrevRaw : null;
         const sCurr = currCountsRef.current.get(ch.id) ?? ch.subscriberCount;
         const previousDisplay = displayCountsRef.current.get(ch.id) ?? sCurr;
 
-        // The API unit bucket is anchored to the latest polled value, not the
-        // currently drifting display value. Otherwise a display that drifted
-        // up into the next bucket would re-anchor and never come back, even
-        // though the underlying polled value never crossed the boundary.
+        // bucket은 폴링값 기준 — drifted display가 다음 bucket으로 넘어가지 못하게 유지.
         const bucket = sCurr > 0 ? getApiBucket(sCurr) : null;
 
         const arrivedAt = snapshotArrivedAtRef.current.get(ch.id) ?? now;
         const elapsedSeconds = (now - arrivedAt) / 1000;
 
-        const rawInterpolatedTarget = Math.round(
-          interpolate({ sPrev, sCurr, tInterval, t: elapsedSeconds, safetyRatio })
-        );
-        const interpolatedTarget = bucket
-          ? clampToBucket(rawInterpolatedTarget, bucket)
-          : rawInterpolatedTarget;
+        // 마일스톤 기반 추정 — 폴링 간격에 의존하지 않음. cap = 다음 bucket
+        // 경계의 safetyRatio 위치, cap 도달 후 ±10% × unit sin oscillation.
+        const interpolatedTarget = estimateSubscriberCount({
+          polledCount: sCurr,
+          growthRatePerHour: ch.growthRatePerHour,
+          elapsedSeconds,
+          safetyRatio,
+        });
 
         const correctionStartForChannel = correctionStartCountsRef.current.get(ch.id);
         let displayCount: number;
@@ -521,7 +516,7 @@ export function useInterpolatedSnapshot(
         rafRef.current = null;
       }
     };
-  }, [data, pollIntervalHours, safetyRatio]);
+  }, [data, safetyRatio]);
 
   return interpolated;
 }

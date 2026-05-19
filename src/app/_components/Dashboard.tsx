@@ -58,7 +58,12 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
     ? interpolatedChannels
     : snapshot.channels.map((ch) => ({
         ...ch,
-        prevCount: ch.subscriberCount,
+        // First paint (before the interpolation hook has ticked) shows the
+        // server-projected estimate so the page doesn't snap to a stale polled
+        // value. The hook seeds its drift state from this same value on first
+        // hydration to avoid a visible jump on the first tick.
+        subscriberCount: ch.estimatedSubscriberCount,
+        prevCount: ch.estimatedSubscriberCount,
         polledSubscriberCount: ch.subscriberCount,
         motionActiveUntil: 0,
         motionDirection: 0 as const,
