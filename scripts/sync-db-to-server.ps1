@@ -25,7 +25,8 @@
 [CmdletBinding()]
 param(
     [string]$SshHost,
-    [string]$RemotePath
+    [string]$RemotePath,
+    [switch]$Yes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,8 +62,12 @@ Write-Host "About to OVERWRITE the SQLite DB inside the 'subrace_data' volume on
 Write-Host "  ssh host : $SshHost"
 Write-Host "  repo path: $RemotePath"
 Write-Host ""
-$reply = Read-Host "Type 'yes' to continue"
-if ($reply -ne 'yes') { Write-Host "Aborted."; exit 1 }
+if (-not $Yes) {
+    $reply = Read-Host "Type 'yes' to continue"
+    if ($reply -ne 'yes') { Write-Host "Aborted."; exit 1 }
+} else {
+    Write-Host "(skipping confirmation: -Yes was set)"
+}
 
 # --- 1) stage on the server -------------------------------------------------
 $remoteTmp = "/tmp/subrace-db-sync-$([System.Guid]::NewGuid().ToString('N').Substring(0,8))"
@@ -88,9 +93,9 @@ $remoteScript = @'
 set -euo pipefail
 cd "REPO_PATH"
 echo "[remote] Stopping web + worker..."
-docker compose stop web worker
+sudo docker compose stop web worker
 echo "[remote] Swapping DB inside subrace_data volume..."
-docker run --rm \
+sudo docker run --rm \
   -v subrace_data:/data \
   -v "TMP_DIR":/in \
   alpine sh -c '
@@ -105,7 +110,7 @@ docker run --rm \
 echo "[remote] Cleaning up staging dir..."
 rm -rf "TMP_DIR"
 echo "[remote] Bringing the stack back up..."
-docker compose up -d
+sudo docker compose up -d
 '@
 $remoteScript = $remoteScript.Replace('REPO_PATH', $RemotePath).Replace('TMP_DIR', $remoteTmp)
 
@@ -119,7 +124,7 @@ $deadline = (Get-Date).AddSeconds(90)
 $healthy = $false
 do {
     Start-Sleep -Seconds 5
-    $status = & ssh $SshHost "cd '$RemotePath' && docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | grep subrace-web"
+    $status = & ssh $SshHost "cd '$RemotePath' && sudo docker compose ps --format '{{.Name}} {{.Status}}' 2>/dev/null | grep subrace-web"
     Write-Host "  $status"
     if ($status -match 'healthy') { $healthy = $true; break }
 } while ((Get-Date) -lt $deadline)
@@ -128,6 +133,6 @@ if ($healthy) {
     Write-Host ""
     Write-Host "[OK] DB sync complete. subrace-web is healthy."
 } else {
-    Write-Warning "Web did not report healthy within 90s. Check with: ssh $SshHost 'cd $RemotePath && docker compose logs --tail=50 web'"
+    Write-Warning "Web did not report healthy within 90s. Check with: ssh $SshHost 'cd $RemotePath && sudo docker compose logs --tail=50 web'"
     exit 2
 }
