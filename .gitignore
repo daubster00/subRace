@@ -63,3 +63,14 @@ _seed_test.ts
 # per-user Claude Code state
 .claude/settings.local.json
 .claude/skills/
+
+# local scratch (auth cookies for one-off seed scripts, etc.)
+.tmp/
+
+# scratch dumps from inspecting deployed pages (May 2026)
+/page.html
+/served.css
+/.tmp-video-analysis/
+
+# server-side deploy config (SSH alias + remote path)
+.env.deploy
