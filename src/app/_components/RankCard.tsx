@@ -112,7 +112,7 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
       className="min-h-0 flex items-center gap-[8px] px-[8px] py-[5px]"
       style={{
         display: 'grid',
-        gridTemplateColumns: '28px 35px minmax(0,1fr)',
+        gridTemplateColumns: '28px 45px minmax(0,1fr)',
         position: 'relative',
         background: 'linear-gradient(180deg, rgba(12,29,45,0.78), rgba(8,18,30,0.72))',
         border: `1px solid ${borderColor}`,
@@ -225,7 +225,7 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
         {rank}
       </span>
       <div
-        className="w-[30px] h-[30px] flex items-center justify-center overflow-hidden rounded-full text-white text-[11px] font-[800]"
+        className="w-[40px] h-[40px] flex items-center justify-center overflow-hidden rounded-full text-white text-[13px] font-[800]"
         style={{
           background: 'linear-gradient(135deg, #1d9fff, #1ee6b8)',
           boxShadow: '0 0 0 1px rgba(255,255,255,0.14), 0 3px 12px rgba(0,0,0,0.32)',
@@ -235,8 +235,8 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
           <Image
             src={channel.thumbnailUrl}
             alt={channel.name}
-            width={30}
-            height={30}
+            width={40}
+            height={40}
             className="w-full h-full object-cover"
             unoptimized
           />
