@@ -8,7 +8,6 @@ import { detectAlerts } from '@/lib/rank-alert';
 import type { AlertChannel, AlertPair } from '@/lib/rank-alert';
 import type { ClientConfig } from '@/lib/client-config';
 import { Header } from './Header';
-import { Hero } from './Hero';
 import { Legend } from './Legend';
 import { RankGrid } from './RankGrid';
 import { BottomPanels } from './BottomPanels';
@@ -183,12 +182,12 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
         background: 'linear-gradient(180deg, rgba(0,178,255,0.02), rgba(0,0,0,0))',
       }}
     >
-      <Header timezone={config.timezone} />
-      <main className="flex-1 min-h-0 flex flex-col px-[var(--page-padding)] pt-3">
-        <Hero
-          clientChannel={snapshot.clientChannel}
-          displayLimit={displayLimit}
-        />
+      <Header
+        timezone={config.timezone}
+        clientChannel={snapshot.clientChannel}
+        displayLimit={displayLimit}
+      />
+      <main className="flex-1 min-h-0 flex flex-col px-[var(--page-padding)] pt-[6px]">
         <Legend />
         <RankGrid
           channels={visibleChannels}

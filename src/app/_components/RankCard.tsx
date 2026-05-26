@@ -109,10 +109,10 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
         y: { duration: motionDuration, delay: motionDelay, ease: 'easeOut' },
         scale: { duration: motionDuration, delay: motionDelay, ease: 'easeOut' },
       }}
-      className="min-h-0 flex items-center gap-[8px] px-[8px] py-[5px]"
+      className="min-h-0 flex items-center gap-[10px] px-[10px] py-[7px]"
       style={{
         display: 'grid',
-        gridTemplateColumns: '28px 45px minmax(0,1fr)',
+        gridTemplateColumns: '32px 48px minmax(0,1fr)',
         position: 'relative',
         background: 'linear-gradient(180deg, rgba(12,29,45,0.78), rgba(8,18,30,0.72))',
         border: `1px solid ${borderColor}`,
@@ -219,13 +219,13 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
         </div>
       )}
       <span
-        className="text-center text-white text-[16px] font-[750]"
+        className="text-center text-white text-[20px] font-[750]"
         style={{ fontVariantNumeric: 'tabular-nums' }}
       >
         {rank}
       </span>
       <div
-        className="w-[40px] h-[40px] flex items-center justify-center overflow-hidden rounded-full text-white text-[13px] font-[800]"
+        className="w-[44px] h-[44px] flex items-center justify-center overflow-hidden rounded-full text-white text-[14px] font-[800]"
         style={{
           background: 'linear-gradient(135deg, #1d9fff, #1ee6b8)',
           boxShadow: '0 0 0 1px rgba(255,255,255,0.14), 0 3px 12px rgba(0,0,0,0.32)',
@@ -235,8 +235,8 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
           <Image
             src={channel.thumbnailUrl}
             alt={channel.name}
-            width={40}
-            height={40}
+            width={44}
+            height={44}
             className="w-full h-full object-cover"
             unoptimized
           />
@@ -244,15 +244,15 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
           channel.name.slice(0, 2)
         )}
       </div>
-      <div className="min-w-0 flex flex-col justify-center gap-[2px]">
+      <div className="min-w-0 flex flex-col justify-center gap-[3px]">
         <span
-          className="block text-[12px] font-[550] leading-[1.12] whitespace-nowrap overflow-hidden text-ellipsis"
+          className="block text-[14px] font-[600] leading-[1.12] whitespace-nowrap overflow-hidden text-ellipsis"
           style={{ color: '#eaf2ff' }}
         >
           {channel.name}
         </span>
         <div
-          className="text-white text-[17px] font-[600] leading-[1.05] flex justify-end"
+          className="text-white text-[22px] font-[700] leading-[1.05] flex justify-end"
           style={{ overflow: 'visible', minWidth: 0 }}
         >
           <RollingCounter
