@@ -8,6 +8,11 @@ import db from '@/lib/db';
 const RETENTION_THRESHOLD_DAYS = 90;
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+// projection sampler가 1분 주기로 행을 쌓는 진단 테이블. 활성 채널 150개 ×
+// 1440분/일 × 14일 = 약 300만 행 상한. 14일 넘은 행은 같은 sweep에서 제거.
+// 진단이 끝나면 sampler/테이블/이 sweep 한 번에 정리한다.
+const PROJECTED_RETENTION_DAYS = 14;
+
 function runRetentionSweep(): void {
   const cutoff = new Date(
     Date.now() - RETENTION_THRESHOLD_DAYS * 24 * 60 * 60 * 1000,
@@ -23,22 +28,36 @@ function runRetentionSweep(): void {
     `)
     .all(cutoff) as { id: string }[];
 
-  if (targets.length === 0) return;
+  if (targets.length > 0) {
+    const ids = targets.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
 
-  const ids = targets.map((r) => r.id);
-  const placeholders = ids.map(() => '?').join(',');
+    const purge = db.transaction(() => {
+      db.prepare(
+        `DELETE FROM subscriber_snapshots WHERE channel_id IN (${placeholders})`,
+      ).run(...ids);
+      db.prepare(`DELETE FROM channels WHERE id IN (${placeholders})`).run(...ids);
+    });
+    purge();
 
-  const purge = db.transaction(() => {
-    db.prepare(
-      `DELETE FROM subscriber_snapshots WHERE channel_id IN (${placeholders})`,
-    ).run(...ids);
-    db.prepare(`DELETE FROM channels WHERE id IN (${placeholders})`).run(...ids);
-  });
-  purge();
+    console.log(
+      `[worker] retention_sweep purged_channels=${ids.length} cutoff=${cutoff}`,
+    );
+  }
 
-  console.log(
-    `[worker] retention_sweep purged_channels=${ids.length} cutoff=${cutoff}`,
-  );
+  const projectedCutoff = new Date(
+    Date.now() - PROJECTED_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const projectedResult = db
+    .prepare(
+      `DELETE FROM projected_subscriber_snapshots WHERE sampled_at < ?`,
+    )
+    .run(projectedCutoff);
+  if (projectedResult.changes > 0) {
+    console.log(
+      `[worker] projected_retention_sweep purged_rows=${projectedResult.changes} cutoff=${projectedCutoff}`,
+    );
+  }
 }
 
 export function startRetentionScheduler(): void {

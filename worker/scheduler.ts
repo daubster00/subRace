@@ -6,6 +6,7 @@ import { backfillSixtyDaySnapshots, pollYuturaChartHistory } from './yutura-char
 import { pollYoutubeChannels } from './youtube-channels';
 import { startLivePoller } from './youtube-live';
 import { pollYoutubeLikes } from './youtube-likes';
+import { startProjectionSampler } from './projection-sampler';
 import { startRetentionScheduler } from './retention';
 
 function getLastSuccessAt(table: 'yutura_pulls' | 'youtube_polls'): Date | null {
@@ -130,6 +131,7 @@ export function startScheduler(): void {
   }, 60_000);
 
   startLivePoller();
+  startProjectionSampler();
   startRetentionScheduler();
 }
 

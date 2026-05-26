@@ -211,6 +211,31 @@ export function readSnapshot(): SnapshotResponse {
   const nowMs = Date.now();
   const safetyRatio = env.ESTIMATION_SAFETY_RATIO;
 
+  // 진단용 projected_subscriber_snapshots (1분 sampler가 채움)에서 채널별 최신
+  // 행을 한 번에 읽어와 Map으로 보관. 첫 페인트 값으로 폴링 라운드 수 대신
+  // 이 보간값을 쓰면 화면이 항상 000으로 끝나는 라운드 수에서 시작하는 문제가
+  // 없어짐. 5분보다 오래된 행은 sampler가 멈춘 신호로 보고 무시 → 아래
+  // fresh estimateSubscriberCount 호출로 fallback.
+  const PROJECTION_FRESHNESS_MS = 5 * 60 * 1000;
+  const projectedFreshSince = new Date(nowMs - PROJECTION_FRESHNESS_MS).toISOString();
+  const projectedRows = db
+    .prepare(
+      `
+      SELECT channel_id, projected_count, sampled_at
+      FROM   projected_subscriber_snapshots ps
+      WHERE  ps.sampled_at >= ?
+        AND  ps.sampled_at = (
+              SELECT MAX(ps2.sampled_at)
+              FROM   projected_subscriber_snapshots ps2
+              WHERE  ps2.channel_id = ps.channel_id
+            )
+    `,
+    )
+    .all(projectedFreshSince) as { channel_id: string; projected_count: number; sampled_at: string }[];
+  const latestProjected = new Map<string, number>(
+    projectedRows.map((r) => [r.channel_id, r.projected_count]),
+  );
+
   const channels: Channel[] = channelRows.map((row, i) => {
     const baseline = row.surge_baseline_count;
     const surgeDelta = baseline != null && baseline > 0
@@ -238,12 +263,16 @@ export function readSnapshot(): SnapshotResponse {
     const elapsedSeconds = row.polled_at
       ? Math.max(0, (nowMs - new Date(row.polled_at).getTime()) / 1000)
       : 0;
-    const estimatedSubscriberCount = estimateSubscriberCount({
-      polledCount: row.subscriber_count,
-      growthRatePerHour,
-      elapsedSeconds,
-      safetyRatio,
-    });
+    const projectedFromSampler = latestProjected.get(row.id);
+    const estimatedSubscriberCount =
+      projectedFromSampler != null
+        ? projectedFromSampler
+        : estimateSubscriberCount({
+            polledCount: row.subscriber_count,
+            growthRatePerHour,
+            elapsedSeconds,
+            safetyRatio,
+          });
 
     return {
       id:              row.id,
