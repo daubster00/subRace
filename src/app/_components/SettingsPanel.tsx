@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { apiUrl } from '@/lib/apiUrl';
 
 interface FieldDef {
   key: string;
@@ -103,7 +104,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/settings')
+    fetch(apiUrl('/api/settings'))
       .then(async (r) => {
         if (!r.ok) throw new Error(`fetch_failed status=${r.status}`);
         return r.json() as Promise<Record<string, string | number>>;
@@ -132,7 +133,7 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
     setSaving(true);
     setSaveError(null);
     try {
-      const res = await fetch('/api/settings', {
+      const res = await fetch(apiUrl('/api/settings'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(toPayloadValues(values)),

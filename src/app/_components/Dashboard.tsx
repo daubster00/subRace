@@ -7,6 +7,7 @@ import { useInterpolatedSnapshot } from '@/hooks/useInterpolatedSnapshot';
 import { detectAlerts } from '@/lib/rank-alert';
 import type { AlertChannel, AlertPair } from '@/lib/rank-alert';
 import type { ClientConfig } from '@/lib/client-config';
+import { apiUrl } from '@/lib/apiUrl';
 import { Header } from './Header';
 import { Legend } from './Legend';
 import { RankGrid } from './RankGrid';
@@ -19,7 +20,7 @@ interface DashboardProps {
 }
 
 async function fetchSnapshot(): Promise<SnapshotResponse> {
-  const res = await fetch('/api/snapshot');
+  const res = await fetch(apiUrl('/api/snapshot'));
   if (!res.ok) throw new Error('snapshot_fetch_failed');
   return res.json() as Promise<SnapshotResponse>;
 }
@@ -151,7 +152,7 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
   // First buildId is stored as the baseline; any mismatch triggers a reload so
   // long-lived display tabs pick up new code without manual refresh.
   useEffect(() => {
-    const es = new EventSource('/api/events');
+    const es = new EventSource(apiUrl('/api/events'));
     let baselineBuildId: string | null = null;
 
     const onHello = (event: MessageEvent) => {
