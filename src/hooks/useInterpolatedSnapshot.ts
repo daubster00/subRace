@@ -17,18 +17,41 @@ const CORRECTION_DURATION_MS = 1500;
 // Matches the total RankCard border trace + corner animation time
 // (left trace: 1575ms delay + 2600ms duration ≈ 4175ms)
 const MOTION_TOTAL_DURATION_MS = 4_200;
-const DISPLAY_COUNTS_STORAGE_KEY = 'subRace:displayCounts:v1';
+const DISPLAY_COUNTS_STORAGE_KEY = 'subRace:displayCounts:v2';
 const DISPLAY_COUNTS_TTL_MS = 24 * 60 * 60 * 1000;
 const DISPLAY_COUNTS_SAVE_INTERVAL_MS = 2_000;
 const MIN_STEP_MS = 650;
 const MAX_STEP_MS = 1_400;
-const MIN_IDLE_MS = 2_500;
-const MAX_IDLE_MS = 14_000;
-const FLAT_DRIFT_MIN_DECISION_MS = 3_500;
-const FLAT_DRIFT_MAX_DECISION_MS = 12_000;
-const MOTION_REPEAT_COOLDOWN_MIN_MS = 7_000;
-const MOTION_REPEAT_COOLDOWN_MAX_MS = 20_000;
-const MAX_ACTIVE_MOTIONS = 6;
+const MAX_ACTIVE_MOTIONS = 15;
+
+// 채널의 growthRatePerHour로 모션 빈도를 결정. 변동 큰 채널은 자주, 정체
+// 채널은 드물게 → ISSEI(1,374/h) 같은 핫 채널이 모션 큐를 잡고 늘어지는 일
+// 없이 자기 페이스로 빠르게 따라잡는다. 정체 채널은 어차피 보여줄 변화가
+// 없으니 대역폭을 양보.
+interface MotionCadence {
+  cooldownMin: number; // 모션 종료 후 다음 모션까지 차단 (ms)
+  cooldownMax: number;
+  idleMin: number;     // 모션 결정(skip 포함) 후 다음 결정까지 (ms)
+  idleMax: number;
+}
+
+function getMotionCadence(growthRatePerHour: number | null): MotionCadence {
+  const rate = Math.abs(growthRatePerHour ?? 0);
+  if (rate >= 500) {
+    // Hot (ISSEI tier ≈ 1,374/h). 채널당 cycle 2~5s.
+    return { cooldownMin: 1_500, cooldownMax: 3_500, idleMin: 600, idleMax: 1_800 };
+  }
+  if (rate >= 100) {
+    // Active (ADO tier ≈ 96/h~수백/h). cycle 5~12s.
+    return { cooldownMin: 3_500, cooldownMax: 8_000, idleMin: 1_500, idleMax: 4_000 };
+  }
+  if (rate >= 20) {
+    // Mid. cycle 10~23s.
+    return { cooldownMin: 7_000, cooldownMax: 15_000, idleMin: 2_500, idleMax: 8_000 };
+  }
+  // Quiet / stagnant. cycle 20~44s, 큐 대역폭 양보.
+  return { cooldownMin: 15_000, cooldownMax: 30_000, idleMin: 5_000, idleMax: 14_000 };
+}
 // 채널 간 새 모션 시작 사이의 최소 간격(랜덤). 같은 프레임/근접 프레임에
 // 여러 채널이 동시에 모션을 시작해 어색하게 보이는 것을 막는다.
 // 상한은 "전체 뷰에서 변화가 멈춰 있는 최대 시간"을 직접 결정한다 — 3초 미만으로 유지.
@@ -75,9 +98,9 @@ function getFlatDriftAmplitude(count: number, bucket: ApiBucket): number {
   return Math.min(base, halfUnit);
 }
 
-function createMotionState(now: number): MotionState {
+function createMotionState(now: number, cadence: MotionCadence): MotionState {
   return {
-    nextDecisionAt: now + randomBetween(0, MAX_IDLE_MS),
+    nextDecisionAt: now + randomBetween(0, cadence.idleMax),
     activeUntil: 0,
     nextStepAt: 0,
     direction: 0,
@@ -93,13 +116,13 @@ function startMotion(state: MotionState, now: number, direction: -1 | 1, driftTa
   state.nextStepAt = now + randomBetween(150, 600);
 }
 
-function endMotion(state: MotionState, now: number) {
+function endMotion(state: MotionState, now: number, cadence: MotionCadence) {
   state.direction = 0;
   state.activeUntil = 0;
   state.nextStepAt = 0;
   state.driftTarget = 0;
-  state.repeatBlockedUntil = now + randomBetween(MOTION_REPEAT_COOLDOWN_MIN_MS, MOTION_REPEAT_COOLDOWN_MAX_MS);
-  state.nextDecisionAt = state.repeatBlockedUntil + randomBetween(FLAT_DRIFT_MIN_DECISION_MS, FLAT_DRIFT_MAX_DECISION_MS);
+  state.repeatBlockedUntil = now + randomBetween(cadence.cooldownMin, cadence.cooldownMax);
+  state.nextDecisionAt = state.repeatBlockedUntil + randomBetween(cadence.idleMin, cadence.idleMax);
 }
 
 function stepFlatCount({
@@ -109,6 +132,7 @@ function stepFlatCount({
   state,
   now,
   canStartMotion,
+  cadence,
 }: {
   current: number;
   polled: number;
@@ -116,14 +140,15 @@ function stepFlatCount({
   state: MotionState;
   now: number;
   canStartMotion: boolean;
+  cadence: MotionCadence;
 }): number {
   if (state.direction !== 0 && now > state.activeUntil) {
-    endMotion(state, now);
+    endMotion(state, now, cadence);
   }
 
   if (state.direction === 0 && now >= state.nextDecisionAt) {
     if (!canStartMotion || now < state.repeatBlockedUntil) {
-      state.nextDecisionAt = Math.max(state.repeatBlockedUntil, now + randomBetween(2_000, 7_000));
+      state.nextDecisionAt = Math.max(state.repeatBlockedUntil, now + randomBetween(cadence.idleMin, cadence.idleMax));
       return current;
     }
 
@@ -137,7 +162,7 @@ function stepFlatCount({
     const driftTarget = clampToBucket(Math.round(polled + nextOffset), bucket);
     const direction = Math.sign(driftTarget - current) as -1 | 0 | 1;
     if (direction === 0) {
-      state.nextDecisionAt = now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
+      state.nextDecisionAt = now + randomBetween(cadence.idleMin, cadence.idleMax);
       return current;
     }
     startMotion(state, now, direction, driftTarget);
@@ -172,6 +197,7 @@ function stepNaturalCount({
   stateMap,
   now,
   canStartMotion,
+  cadence,
 }: {
   channelId: string;
   current: number;
@@ -181,26 +207,27 @@ function stepNaturalCount({
   stateMap: Map<string, MotionState>;
   now: number;
   canStartMotion: boolean;
+  cadence: MotionCadence;
 }): number {
   const trend = Math.sign(target - polled) as -1 | 0 | 1;
 
   let state = stateMap.get(channelId);
   if (!state) {
-    state = createMotionState(now);
+    state = createMotionState(now, cadence);
     stateMap.set(channelId, state);
   }
 
   if (trend === 0 || target === current) {
-    return stepFlatCount({ current, polled, bucket, state, now, canStartMotion });
+    return stepFlatCount({ current, polled, bucket, state, now, canStartMotion, cadence });
   }
 
   if (state.direction !== 0 && now > state.activeUntil) {
-    endMotion(state, now);
+    endMotion(state, now, cadence);
   }
 
   if (state.direction === 0 && now >= state.nextDecisionAt) {
     if (!canStartMotion || now < state.repeatBlockedUntil) {
-      state.nextDecisionAt = Math.max(state.repeatBlockedUntil, now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS));
+      state.nextDecisionAt = Math.max(state.repeatBlockedUntil, now + randomBetween(cadence.idleMin, cadence.idleMax));
       return current;
     }
 
@@ -220,7 +247,7 @@ function stepNaturalCount({
     } else if (shouldMove) {
       startMotion(state, now, trend as -1 | 1, clampToBucket(target, bucket));
     } else {
-      state.nextDecisionAt = now + randomBetween(MIN_IDLE_MS, MAX_IDLE_MS);
+      state.nextDecisionAt = now + randomBetween(cadence.idleMin, cadence.idleMax);
     }
   }
 
@@ -457,6 +484,7 @@ export function useInterpolatedSnapshot(
             stateMap: motionStatesRef.current,
             now,
             canStartMotion: activeMotionCount < MAX_ACTIVE_MOTIONS && motionGapReady,
+            cadence: getMotionCadence(ch.growthRatePerHour),
           });
 
           const stateAfter = motionStatesRef.current.get(ch.id);
