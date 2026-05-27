@@ -207,8 +207,9 @@
 
 #### F-10. 임박 카드 강조
 - **트리거 (AND 조건)**: 인접 순위(N위, N+1위)의 두 채널이 **다음 두 조건을 모두** 만족할 때
-  1. **절대값 조건**: 구독자 수 차이가 `RANK_ALERT_ABSOLUTE_THRESHOLD` 이하 (초기 제안: `10000`명)
-  2. **증가율 조건**: 현재 증가 속도 차이로 계산했을 때 `RANK_ALERT_TIME_THRESHOLD_HOURS` 이내에 역전 가능 (초기 제안: `1`시간)
+  1. **절대값 조건**: 구독자 수 차이가 `RANK_ALERT_ABSOLUTE_THRESHOLD` 이하 (초기 제안: `3000`명)
+  2. **증가율 조건**: 현재 증가 속도 차이로 계산했을 때 `RANK_ALERT_TIME_THRESHOLD_HOURS` 이내에 역전 가능 (초기 제안: `0.25`시간 = 15분)
+  - 임계값을 좁게 잡는 이유: `growthRatePerHour`가 30일 trend baseline 기반(`snapshot.ts`)이라 단기 변동에 둔감하다. 임계값이 후하면 동일 페어가 30일 평균이 뒤집힐 때까지 며칠 동안 임박 상태로 고정된다.
 - **계산**:
   - 두 채널의 최근 폴링 기준 평균 증가율 차이 `Δr = r_lower - r_upper`
   - 역전 예상 시간 `t_flip = (S_upper - S_lower) / Δr` (단, `Δr > 0`인 경우만 의미 있음)
@@ -303,8 +304,8 @@
 | `SOCIALBLADE_INTERVAL_HOURS` | `48` | Social Blade 폴링 주기 |
 | `YOUTUBE_POLL_INTERVAL_HOURS` | `6` | YouTube API 폴링 주기 |
 | `ESTIMATION_SAFETY_RATIO` | `0.85` | 85% 추정 안전 비율 |
-| `RANK_ALERT_ABSOLUTE_THRESHOLD` | `10000` | 임박 판정 - 구독자 수 차이 절대값 (명) |
-| `RANK_ALERT_TIME_THRESHOLD_HOURS` | `1` | 임박 판정 - 역전 예상 시간 임계값 |
+| `RANK_ALERT_ABSOLUTE_THRESHOLD` | `3000` | 임박 판정 - 구독자 수 차이 절대값 (명) |
+| `RANK_ALERT_TIME_THRESHOLD_HOURS` | `0.25` | 임박 판정 - 역전 예상 시간 임계값 (시간, 0.25 = 15분) |
 | `CLIENT_CHANNEL_ID` | — | SummaryCard 추적 대상 채널 (개발 중에는 임의 채널) |
 | `LIVE_VIEWER_POLL_INTERVAL_SECONDS` | `60` | 라이브 시청자 수 폴링 주기 |
 | `BASIC_AUTH_USERNAME` | — | 운영자 ID |
