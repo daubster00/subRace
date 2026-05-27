@@ -2,11 +2,9 @@ import db from '@/lib/db';
 import { env } from '@/lib/env';
 import { createSingleFlight } from '@/lib/single-flight';
 import { pollYutura } from './yutura';
-import { backfillSixtyDaySnapshots, pollYuturaChartHistory } from './yutura-chart';
 import { pollYoutubeChannels } from './youtube-channels';
 import { startLivePoller } from './youtube-live';
 import { pollYoutubeLikes } from './youtube-likes';
-import { startProjectionSampler } from './projection-sampler';
 import { startRetentionScheduler } from './retention';
 
 function getLastSuccessAt(table: 'yutura_pulls' | 'youtube_polls'): Date | null {
@@ -14,13 +12,6 @@ function getLastSuccessAt(table: 'yutura_pulls' | 'youtube_polls'): Date | null 
   const row = db
     .prepare(`SELECT MAX(${col}) AS t FROM ${table} WHERE status = 'success'`)
     .get() as { t: string | null };
-  return row.t ? new Date(row.t) : null;
-}
-
-function getLastChartPullAt(kind: 'chart' | 'monthly_backfill'): Date | null {
-  const row = db
-    .prepare(`SELECT MAX(pulled_at) AS t FROM chart_pulls WHERE kind = ? AND status = 'success'`)
-    .get(kind) as { t: string | null };
   return row.t ? new Date(row.t) : null;
 }
 
@@ -66,9 +57,6 @@ export function startScheduler(): void {
   const yuturaIntervalMs = (): number => env.YUTURA_INTERVAL_HOURS * 60 * 60 * 1000;
   const channelsIntervalMs = (): number => env.YOUTUBE_POLL_INTERVAL_HOURS * 60 * 60 * 1000;
   const likesIntervalMs = (): number => env.YOUTUBE_LIKES_POLL_INTERVAL_HOURS * 60 * 60 * 1000;
-  const chartIntervalMs = (): number => env.YUTURA_CHART_INTERVAL_HOURS * 60 * 60 * 1000;
-  const monthlyBackfillIntervalMs = (): number =>
-    env.YUTURA_MONTHLY_BACKFILL_INTERVAL_HOURS * 60 * 60 * 1000;
 
   // isDue() only inspects the last *finished* poll, so without single-flight
   // locks a long-running poll (yutura resolve ~225s) would overlap with the
@@ -84,10 +72,6 @@ export function startScheduler(): void {
       lastLikesPollAt = new Date();
     }
   });
-  // chart sweep can run ~4 min for 150 channels; single-flight prevents the
-  // 60s tick from queueing a parallel sweep mid-flight.
-  const runChart = createSingleFlight(() => pollYuturaChartHistory());
-  const runMonthlyBackfill = createSingleFlight(() => backfillSixtyDaySnapshots());
   runLikesFn = runLikes;
 
   if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void runYutura();
@@ -98,15 +82,6 @@ export function startScheduler(): void {
 
   // No persisted last-poll for likes — fire once on startup, then cadence.
   void runLikes();
-
-  // Defer chart + monthly-backfill startup runs to wait for pollYutura to seed
-  // channels.source_id first. The chart job only iterates channels with a
-  // resolved source_id, so kicking it off before the first ranking poll would
-  // be a no-op on a fresh deploy.
-  if (isDue(getLastChartPullAt('chart'), chartIntervalMs())) void runChart();
-  if (isDue(getLastChartPullAt('monthly_backfill'), monthlyBackfillIntervalMs())) {
-    void runMonthlyBackfill();
-  }
 
   setInterval(() => {
     if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void runYutura();
@@ -120,18 +95,7 @@ export function startScheduler(): void {
     if (isDue(lastLikesPollAt, likesIntervalMs())) void runLikes();
   }, 60_000);
 
-  setInterval(() => {
-    if (isDue(getLastChartPullAt('chart'), chartIntervalMs())) void runChart();
-  }, 60_000);
-
-  setInterval(() => {
-    if (isDue(getLastChartPullAt('monthly_backfill'), monthlyBackfillIntervalMs())) {
-      void runMonthlyBackfill();
-    }
-  }, 60_000);
-
   startLivePoller();
-  startProjectionSampler();
   startRetentionScheduler();
 }
 

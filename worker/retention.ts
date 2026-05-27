@@ -8,11 +8,6 @@ import db from '@/lib/db';
 const RETENTION_THRESHOLD_DAYS = 90;
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-// projection sampler가 1분 주기로 행을 쌓는 진단 테이블. 활성 채널 150개 ×
-// 1440분/일 × 14일 = 약 300만 행 상한. 14일 넘은 행은 같은 sweep에서 제거.
-// 진단이 끝나면 sampler/테이블/이 sweep 한 번에 정리한다.
-const PROJECTED_RETENTION_DAYS = 14;
-
 function runRetentionSweep(): void {
   const cutoff = new Date(
     Date.now() - RETENTION_THRESHOLD_DAYS * 24 * 60 * 60 * 1000,
@@ -42,20 +37,6 @@ function runRetentionSweep(): void {
 
     console.log(
       `[worker] retention_sweep purged_channels=${ids.length} cutoff=${cutoff}`,
-    );
-  }
-
-  const projectedCutoff = new Date(
-    Date.now() - PROJECTED_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-  ).toISOString();
-  const projectedResult = db
-    .prepare(
-      `DELETE FROM projected_subscriber_snapshots WHERE sampled_at < ?`,
-    )
-    .run(projectedCutoff);
-  if (projectedResult.changes > 0) {
-    console.log(
-      `[worker] projected_retention_sweep purged_rows=${projectedResult.changes} cutoff=${projectedCutoff}`,
     );
   }
 }
