@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import db from '@/lib/db';
 import { env } from '@/lib/env';
+import { getNextMilestone } from '@/lib/next-milestone';
+import { computeCap } from '@/lib/cap';
 
 const YtChannelItemSchema = z.object({
   id: z.string(),
@@ -77,24 +79,89 @@ export async function pollYoutubeChannels(): Promise<void> {
     }
 
     if (!isQuotaExceeded) {
-      const insertSnapshot = db.prepare(`
+      // M2: 변경분만 milestone 누적 + poll_state upsert.
+      //
+      // - 신규 채널: 마일스톤 INSERT + poll_state 시드 (previous=NULL,
+      //   last_api_changed_at=polledAt — 첫 관측 시각을 기준값으로).
+      // - API 값 변동 없음: poll_state.last_polled_at만 갱신.
+      //   subscriber_snapshots는 손대지 않음 → unique index가 막아주기 전에
+      //   상위 레벨에서 차단.
+      // - API 값 변동: 마일스톤 INSERT (source='youtube_api_change') +
+      //   poll_state UPDATE (previous=기존 api, api=새 값, next_milestone/cap
+      //   재계산, last_api_changed_at=polledAt).
+      const selectPollState = db.prepare(`
+        SELECT api_subscriber_count FROM poll_state WHERE channel_id = ?
+      `);
+      const insertMilestone = db.prepare(`
         INSERT OR IGNORE INTO subscriber_snapshots
-          (channel_id, polled_at, subscriber_count, video_count, view_count)
-        VALUES (?, ?, ?, ?, ?)
+          (channel_id, polled_at, subscriber_count, video_count, view_count, source)
+        VALUES (?, ?, ?, ?, ?, 'youtube_api_change')
+      `);
+      const insertPollState = db.prepare(`
+        INSERT INTO poll_state (
+          channel_id, api_subscriber_count, previous_api_subscriber_count,
+          next_milestone, cap_subscriber_count,
+          last_polled_at, last_api_changed_at, updated_at, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+      `);
+      // SQLite는 UPDATE의 RHS를 원본 컬럼값으로 평가하므로
+      // previous = api_subscriber_count, api = ? 가 안전하다.
+      const updatePollStateChanged = db.prepare(`
+        UPDATE poll_state SET
+          previous_api_subscriber_count = api_subscriber_count,
+          api_subscriber_count          = ?,
+          next_milestone                = ?,
+          cap_subscriber_count          = ?,
+          last_polled_at                = ?,
+          last_api_changed_at           = ?,
+          updated_at                    = ?
+        WHERE channel_id = ?
+      `);
+      const updatePollStateUnchanged = db.prepare(`
+        UPDATE poll_state SET
+          last_polled_at = ?,
+          updated_at     = ?
+        WHERE channel_id = ?
       `);
       const updateThumbnail = db.prepare(`
         UPDATE channels SET thumbnail_url = ? WHERE id = ? AND thumbnail_url IS NULL
       `);
 
+      let seededCount = 0;
+      let changedCount = 0;
+      let unchangedCount = 0;
+
       const commitSuccess = db.transaction((snapshotItems: YtChannelItem[]) => {
         for (const item of snapshotItems) {
-          insertSnapshot.run(
-            item.id,
-            polledAt,
-            parseInt(item.statistics.subscriberCount, 10),
-            item.statistics.videoCount ? parseInt(item.statistics.videoCount, 10) : null,
-            item.statistics.viewCount ? parseInt(item.statistics.viewCount, 10) : null,
-          );
+          const apiCount = parseInt(item.statistics.subscriberCount, 10);
+          const videoCount = item.statistics.videoCount ? parseInt(item.statistics.videoCount, 10) : null;
+          const viewCount = item.statistics.viewCount ? parseInt(item.statistics.viewCount, 10) : null;
+
+          const existing = selectPollState.get(item.id) as { api_subscriber_count: number } | undefined;
+
+          if (!existing) {
+            const nextMilestone = getNextMilestone(apiCount);
+            const cap = computeCap(apiCount, env.ESTIMATION_SAFETY_RATIO);
+            insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
+            insertPollState.run(
+              item.id, apiCount, nextMilestone, cap,
+              polledAt, polledAt, polledAt, polledAt,
+            );
+            seededCount++;
+          } else if (existing.api_subscriber_count === apiCount) {
+            updatePollStateUnchanged.run(polledAt, polledAt, item.id);
+            unchangedCount++;
+          } else {
+            const nextMilestone = getNextMilestone(apiCount);
+            const cap = computeCap(apiCount, env.ESTIMATION_SAFETY_RATIO);
+            insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
+            updatePollStateChanged.run(
+              apiCount, nextMilestone, cap,
+              polledAt, polledAt, polledAt,
+              item.id,
+            );
+            changedCount++;
+          }
 
           const thumbnailUrl =
             item.snippet?.thumbnails?.medium?.url ??
@@ -111,7 +178,7 @@ export async function pollYoutubeChannels(): Promise<void> {
 
       const n = channelRows.length;
       const durationMs = Date.now() - new Date(startedAt).getTime();
-      console.log(`[worker] youtube_poll_success channels=${n} duration_ms=${durationMs}`);
+      console.log(`[worker] youtube_poll_success channels=${n} seeded=${seededCount} changed=${changedCount} unchanged=${unchangedCount} duration_ms=${durationMs}`);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

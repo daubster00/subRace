@@ -31,6 +31,27 @@ const envSchema = z.object({
   YOUTUBE_LIKES_POLL_INTERVAL_HOURS: z.coerce.number().min(0.01).default(0.5),
   SURGE_WINDOW_HOURS: z.coerce.number().min(0.01).default(24),
   ESTIMATION_SAFETY_RATIO: z.coerce.number().min(0).max(1).default(0.85),
+  // 마일스톤 회귀 계산 (src/lib/milestone-delta.ts).
+  // - WINDOW: 회귀에 사용할 과거 기간. 너무 좁으면 표본 부족, 너무 넓으면
+  //   채널의 옛 페이스가 추세에 끼어듦. 가중치가 지수 감쇠라 실질 무게는
+  //   최근 30~60일에 쏠림.
+  // - HALF_LIFE: 가중치 반감기. 30일 전 행은 어제 행의 1/2 무게,
+  //   60일 전 행은 1/4, 90일 전 행은 1/8.
+  MILESTONE_HISTORY_WINDOW_DAYS: z.coerce.number().int().min(1).default(120),
+  MILESTONE_WEIGHT_HALF_LIFE_DAYS: z.coerce.number().min(0.1).default(30),
+  // M4 display-planner.
+  // - INTERVAL: scheduler가 planAllActiveChannels()를 호출하는 주기. 5분이면
+  //   하루 288회 검사. 대부분 채널은 shouldReplan=false라 비용은 작음.
+  // - JITTER_RATIO: 평균 간격 ±N 분산. 0.5면 [0.5×avg, 1.5×avg]. 0이면 균등.
+  // - CHANGE_BIAS_*는 M5 executor가 증가/감소 이벤트 비율을 정할 때 사용.
+  //   planner는 today_delta 부호로 추세만 정하고, 이벤트별 방향은 executor가
+  //   bias 범위에서 랜덤 선택. (스펙 L282~290)
+  DISPLAY_PLANNER_INTERVAL_MINUTES: z.coerce.number().min(1).default(5),
+  CHANGE_BIAS_UP_INCREASE_MIN: z.coerce.number().min(0).max(1).default(0.75),
+  CHANGE_BIAS_UP_INCREASE_MAX: z.coerce.number().min(0).max(1).default(0.90),
+  CHANGE_BIAS_DOWN_DECREASE_MIN: z.coerce.number().min(0).max(1).default(0.60),
+  CHANGE_BIAS_DOWN_DECREASE_MAX: z.coerce.number().min(0).max(1).default(0.85),
+  CHANGE_INTERVAL_JITTER_RATIO: z.coerce.number().min(0).max(0.99).default(0.50),
   RANK_ALERT_ABSOLUTE_THRESHOLD: z.coerce.number().int().min(0).default(3000),
   RANK_ALERT_TIME_THRESHOLD_HOURS: z.coerce.number().min(0).default(0.25),
   LIVE_VIEWER_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(1).default(60),
