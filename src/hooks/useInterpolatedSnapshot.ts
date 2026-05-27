@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { estimateSubscriberCount } from '@/lib/interpolation';
 import { getApiBucket, clampToBucket, type ApiBucket } from '@/lib/api-bucket';
 import type { Channel, SnapshotResponse } from '@/lib/snapshot';
 
@@ -452,17 +451,9 @@ export function useInterpolatedSnapshot(
         // bucket은 폴링값 기준 — drifted display가 다음 bucket으로 넘어가지 못하게 유지.
         const bucket = sCurr > 0 ? getApiBucket(sCurr) : null;
 
-        const arrivedAt = snapshotArrivedAtRef.current.get(ch.id) ?? now;
-        const elapsedSeconds = (now - arrivedAt) / 1000;
-
-        // 마일스톤 기반 추정 — 폴링 간격에 의존하지 않음. cap = 다음 bucket
-        // 경계의 safetyRatio 위치, cap 도달 후 ±10% × unit sin oscillation.
-        const interpolatedTarget = estimateSubscriberCount({
-          polledCount: sCurr,
-          growthRatePerHour: ch.growthRatePerHour,
-          elapsedSeconds,
-          safetyRatio,
-        });
+        // M5: target = polled. server의 display_state가 executor step마다 갱신되니
+        // 클라이언트 forward-projection 불필요. previousDisplay → polled로 자연 모션.
+        const interpolatedTarget = sCurr;
 
         const correctionStartForChannel = correctionStartCountsRef.current.get(ch.id);
         let displayCount: number;

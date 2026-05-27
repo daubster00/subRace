@@ -25,13 +25,10 @@ const cornerPositions = [
 
 export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProps) {
   const prevRankRef = useRef(rank);
+  const prevCountRef = useRef(channel.subscriberCount);
   const motionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isSwapping, setIsSwapping] = useState(false);
   const [isCounting, setIsCounting] = useState(false);
-  // 모션이 시작될 때(activeUntil이 새로 잡힐 때) 그 시점의 방향을 래치한다.
-  // subscriberCount 변화는 모션 시작보다 150~600ms 늦게 발생하므로
-  // 카운트 기반으로 색을 정하면 테두리가 이전 모션 색으로 잠깐 그려졌다가
-  // 뒤늦게 뒤집히는 깜빡임이 생긴다.
   const [countDirection, setCountDirection] = useState<1 | -1>(1);
 
   // 순위 변경 감지 → 스왑 글로우 800ms
@@ -44,30 +41,33 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
     }
   }, [rank]);
 
-  // 모션 활성 구간 = 테두리 트레이스 + 글로우 + 증감 표시 노출 구간
-  // motionActiveUntil이 바뀌는 시점은 곧 새 모션의 시작이므로,
-  // 같은 타이밍에 방향도 함께 래치해 트레이스가 항상 정확한 색으로 시작되게 한다.
+  // 테두리 모션은 실제 subscriberCount가 바뀌는 시점에 시작한다.
+  // motionActiveUntil 기반으로 트리거하면 1~50 / 51~100 페이지가 스왑되며
+  // 카드가 모션 중간에 mount될 때, 그 모션의 숫자 스텝은 off-screen에서 이미
+  // 끝나 있어서 "테두리는 그려지는데 숫자/증감 표시는 안 나오는" 채널이 생긴다.
+  // 카운트 변화에 묶으면 border ⇔ delta 동기가 자연스럽게 유지된다.
   useEffect(() => {
+    if (prevCountRef.current === channel.subscriberCount) return;
+    prevCountRef.current = channel.subscriberCount;
+
+    const now = Date.now();
+    // 활성 모션과 무관한 카운트 변화(스냅샷 도착 직후 correction lerp 등)는
+    // 테두리를 그리지 않는다.
+    if (channel.motionActiveUntil <= now || channel.motionDirection === 0) return;
+
     if (motionTimerRef.current !== null) {
       clearTimeout(motionTimerRef.current);
-      motionTimerRef.current = null;
     }
 
-    const remaining = channel.motionActiveUntil - Date.now();
-    if (remaining <= 0) {
-      setIsCounting(false);
-      return;
-    }
-
-    if (channel.motionDirection !== 0) {
-      setCountDirection(channel.motionDirection);
-    }
+    setCountDirection(channel.motionDirection);
     setIsCounting(true);
+
+    const remaining = channel.motionActiveUntil - now;
     motionTimerRef.current = setTimeout(() => {
       setIsCounting(false);
       motionTimerRef.current = null;
     }, remaining);
-  }, [channel.motionActiveUntil, channel.motionDirection]);
+  }, [channel.subscriberCount, channel.motionActiveUntil, channel.motionDirection]);
 
   useEffect(() => () => {
     if (motionTimerRef.current !== null) clearTimeout(motionTimerRef.current);

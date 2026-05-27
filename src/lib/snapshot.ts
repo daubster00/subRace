@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import db from '@/lib/db';
 import { env } from '@/lib/env';
-import { estimateSubscriberCount } from '@/lib/interpolation';
 
 // ---------- Zod 응답 스키마 (AC3) ----------
 
@@ -93,6 +92,15 @@ interface LastSuccessRow {
 
 export function readSnapshot(): SnapshotResponse {
   // 1. 채널 + 최신 구독자 스냅샷 (LEFT JOIN — 빈 DB 대응)
+  //
+  // 표시값은 display_state.display_subscriber_count를 1순위로 쓰고, 행이 없는
+  // 채널(planner가 아직 시드 안 함)만 마일스톤 최신값으로 fallback. polled_at도
+  // 동일 — display_state.updated_at이 hook의 forward-projection 기준 시각이
+  // 되어, executor가 박은 step 값 그대로가 화면에 도달한다.
+  //
+  // trend_baseline_*, surge_baseline_*, previous_subscriber_count는 장기 추세
+  // 비교용이라 마일스톤 history(subscriber_snapshots) 그대로 사용.
+  //
   // surge_baseline_count: julianday(latest) - julianday(baseline) >= 1.0 → at
   // least 24h gap. Most recent snapshot satisfying that constraint becomes the
   // 24h baseline. NULL when the channel does not yet have 24h of history.
@@ -102,7 +110,7 @@ export function readSnapshot(): SnapshotResponse {
       c.handle,
       c.name,
       c.thumbnail_url,
-      COALESCE(s.subscriber_count, 0) AS subscriber_count,
+      COALESCE(d.display_subscriber_count, s.subscriber_count, 0) AS subscriber_count,
       (
         SELECT ss_prev.subscriber_count
         FROM   subscriber_snapshots ss_prev
@@ -194,7 +202,7 @@ export function readSnapshot(): SnapshotResponse {
       ) AS surge_baseline_count,
       s.video_count,
       s.view_count,
-      s.polled_at
+      COALESCE(d.updated_at, s.polled_at) AS polled_at
     FROM channels c
     LEFT JOIN subscriber_snapshots s
       ON  s.channel_id = c.id
@@ -203,13 +211,12 @@ export function readSnapshot(): SnapshotResponse {
             FROM   subscriber_snapshots ss
             WHERE  ss.channel_id = c.id
           )
+    LEFT JOIN display_state d
+      ON  d.channel_id = c.id
     WHERE c.is_active = 1
-    ORDER BY COALESCE(s.subscriber_count, 0) DESC
+    ORDER BY COALESCE(d.display_subscriber_count, s.subscriber_count, 0) DESC
     LIMIT ?
   `).all(env.SURGE_WINDOW_HOURS / 24, env.DISPLAY_LIMIT) as ChannelRow[];
-
-  const nowMs = Date.now();
-  const safetyRatio = env.ESTIMATION_SAFETY_RATIO;
 
   const channels: Channel[] = channelRows.map((row, i) => {
     const baseline = row.surge_baseline_count;
@@ -232,18 +239,11 @@ export function readSnapshot(): SnapshotResponse {
       ? trendDelta / trendHours
       : null;
 
-    // Milestone-based projection: rate × elapsedSeconds 누적, 다음 API bucket
-    // 경계의 safetyRatio 위치를 cap으로 잡고, cap 도달 후엔 그 부근에서 sin
-    // 곡선으로 oscillation. 폴링 간격(YOUTUBE_POLL_INTERVAL_HOURS) 무관.
-    const elapsedSeconds = row.polled_at
-      ? Math.max(0, (nowMs - new Date(row.polled_at).getTime()) / 1000)
-      : 0;
-    const estimatedSubscriberCount = estimateSubscriberCount({
-      polledCount: row.subscriber_count,
-      growthRatePerHour,
-      elapsedSeconds,
-      safetyRatio,
-    });
+    // M5: display_state.display_subscriber_count가 이미 executor가 매 step마다
+    // 갱신한 "현재 표시값"이라 server-side forward-projection은 중복이자, 음수
+    // growthRate 채널에선 시간 흐를수록 화면이 감소 방향으로 끌려가는 부작용을
+    // 만든다. 그대로 노출.
+    const estimatedSubscriberCount = row.subscriber_count;
 
     return {
       id:              row.id,
