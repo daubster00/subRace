@@ -457,11 +457,15 @@ export function useInterpolatedSnapshot(
 
         const correctionStartForChannel = correctionStartCountsRef.current.get(ch.id);
         let displayCount: number;
+        let lerpMotionDirection: -1 | 0 | 1 = 0;
         if (correctionProgress < 1 && correctionStartForChannel !== undefined) {
           displayCount = Math.round(
             correctionStartForChannel + (interpolatedTarget - correctionStartForChannel) * correctionFactor
           );
           motionStatesRef.current.delete(ch.id);
+          lerpMotionDirection = Math.sign(
+            interpolatedTarget - correctionStartForChannel
+          ) as -1 | 0 | 1;
         } else if (bucket) {
           const stateBefore = motionStatesRef.current.get(ch.id);
           const wasActiveBefore = (stateBefore?.activeUntil ?? 0) > now && (stateBefore?.direction ?? 0) !== 0;
@@ -498,12 +502,30 @@ export function useInterpolatedSnapshot(
         }
 
         const motionState = motionStatesRef.current.get(ch.id);
-        const motionActiveUntil = motionState?.direction !== 0
+        let motionActiveUntil = motionState?.direction !== 0
           ? (motionState?.activeUntil ?? 0)
           : 0;
-        const motionDirection: -1 | 0 | 1 = motionActiveUntil > now
+        let motionDirection: -1 | 0 | 1 = motionActiveUntil > now
           ? (motionState?.direction ?? 0)
           : 0;
+
+        // 스냅샷 도착 직후 correction lerp 동안에는 motionStatesRef가 비어 있어
+        // motionActiveUntil/Direction이 모두 0이 된다. 그런데 표시값은 lerp로
+        // 매 프레임 바뀌므로 RankCard가 "테두리는 안 그리고 숫자/증감만 움직이는"
+        // 상태로 빠진다 (RankCard.tsx:56). 동일 시점에 변경된 5~6 채널이 동시에
+        // 이 증상을 보이는 버그의 원인.
+        //
+        // lerp 시작점·방향으로 합성 모션 윈도우를 부여해 테두리 트리거를 살린다.
+        // CSS border 애니메이션(약 4.2s) 풀 사이클을 보장하기 위해
+        // MOTION_TOTAL_DURATION_MS 만큼 유지. 자연 모션 state machine은 건드리지
+        // 않으므로 lerp 종료 후 정상 재개된다.
+        if (lerpMotionDirection !== 0) {
+          motionDirection = lerpMotionDirection;
+          motionActiveUntil = Math.max(
+            motionActiveUntil,
+            correctionStartAtRef.current + MOTION_TOTAL_DURATION_MS,
+          );
+        }
 
         displayCountsRef.current.set(ch.id, displayCount);
 
