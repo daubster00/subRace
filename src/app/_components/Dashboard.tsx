@@ -147,21 +147,28 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
     alertPairs.flatMap((p) => [p.upperChannelId, p.lowerChannelId])
   );
 
-  // Auto-reload on new deploy: server pushes its buildId over SSE on connect
-  // (and again on EventSource auto-reconnect after the old container dies).
-  // First buildId is stored as the baseline; any mismatch triggers a reload so
-  // long-lived display tabs pick up new code without manual refresh.
+  // Auto-reload on new deploy: 두 채널을 동시에 운용.
+  //
+  // 1) SSE (/api/events): 컨테이너 교체 즉시 EventSource가 재연결되며 새
+  //    buildId가 도착 → 즉시 reload. 빠르지만, 일부 환경(탭 freeze,
+  //    프록시 keep-alive, EventSource 재연결 누락)에서 신뢰성이 떨어진다.
+  //
+  // 2) 폴링 fallback: 30초마다 도착하는 /api/snapshot 응답에 buildId가
+  //    포함되어 있어, 매번 비교한다. SSE가 침묵해도 최대 30초 내에 reload.
+  //
+  // baseline은 ref로 보관 → useEffect 재실행과 무관하게 첫 값 유지.
+  const baselineBuildIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     const es = new EventSource(apiUrl('/api/events'));
-    let baselineBuildId: string | null = null;
 
     const onHello = (event: MessageEvent) => {
       try {
         const { buildId } = JSON.parse(event.data) as { buildId?: unknown };
         if (typeof buildId !== 'string' || buildId.length === 0) return;
-        if (baselineBuildId === null) {
-          baselineBuildId = buildId;
-        } else if (baselineBuildId !== buildId) {
+        if (baselineBuildIdRef.current === null) {
+          baselineBuildIdRef.current = buildId;
+        } else if (baselineBuildIdRef.current !== buildId) {
           window.location.reload();
         }
       } catch {
@@ -175,6 +182,16 @@ export function Dashboard({ initialData, displayLimit, config }: DashboardProps)
       es.close();
     };
   }, []);
+
+  useEffect(() => {
+    const buildId = data?.buildId;
+    if (typeof buildId !== 'string' || buildId.length === 0) return;
+    if (baselineBuildIdRef.current === null) {
+      baselineBuildIdRef.current = buildId;
+    } else if (baselineBuildIdRef.current !== buildId) {
+      window.location.reload();
+    }
+  }, [data?.buildId]);
 
   return (
     <div

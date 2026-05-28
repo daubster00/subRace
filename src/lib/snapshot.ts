@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import db from '@/lib/db';
 import { env } from '@/lib/env';
+import { getBuildId } from '@/lib/build-id';
 
 // ---------- Zod 응답 스키마 (AC3) ----------
 
@@ -51,6 +52,11 @@ export const SnapshotResponseSchema = z.object({
     live:        SourceStatusSchema,
   }),
   serverTime: z.string(),
+  // .next/BUILD_ID. 클라이언트가 첫 응답값을 baseline으로 저장하고, 이후 폴링
+  // 응답마다 비교 → 다르면 location.reload(). SSE auto-reload(/api/events)의
+  // 폴백: 일부 환경(탭 freeze, 프록시 keep-alive 등)에서 EventSource 재연결이
+  // 느리거나 누락되어도 30초 폴 주기 내에 자동 갱신을 보장한다.
+  buildId: z.string(),
 });
 
 export type SnapshotResponse = z.infer<typeof SnapshotResponseSchema>;
@@ -330,5 +336,6 @@ export function readSnapshot(): SnapshotResponse {
       },
     },
     serverTime: new Date().toISOString(),
+    buildId: getBuildId(),
   };
 }
