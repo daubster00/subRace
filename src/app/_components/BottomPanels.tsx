@@ -63,9 +63,13 @@ function PageCyclePanel({
 }
 
 function RisingChannelsPanel({ channels }: Pick<BottomPanelsProps, 'channels'>) {
+  // 急上昇 = 최근 24h 증가량. readSnapshot이 매 요청마다 surge_baseline_count
+  // (≥24h 전 가장 최근 스냅샷)로 다시 계산하므로 폴링 갱신마다 순위가 갱신된다.
+  // 30~60일 누적인 trendDelta로 정렬하면 baseline 기간이 다른 채널끼리 표시값과
+  // 정렬 키가 어긋난다 (사용자 보고: 큰 값이 뒷 순위).
   const rising = channels
-    .filter((c) => c.growthRatePerHour != null && c.trendDelta != null && c.trendDelta > 0)
-    .sort((a, b) => (b.growthRatePerHour ?? 0) - (a.growthRatePerHour ?? 0))
+    .filter((c) => c.surgeDelta24h != null && c.surgeDelta24h > 0)
+    .sort((a, b) => (b.surgeDelta24h ?? 0) - (a.surgeDelta24h ?? 0))
     .slice(0, 5);
 
   return (
@@ -139,7 +143,7 @@ function RisingChannelsPanel({ channels }: Pick<BottomPanelsProps, 'channels'>) 
                   </p>
                 </div>
                 <p className="m-0 mt-[2px] text-[11px] font-[850]" style={{ color: 'var(--color-increase)' }}>
-                  +{(channel.trendDelta ?? 0).toLocaleString('ja-JP')}
+                  +{(channel.surgeDelta24h ?? 0).toLocaleString('ja-JP')}
                 </p>
               </div>
             </div>
