@@ -234,29 +234,29 @@ describe('shouldReplan', () => {
     expect(shouldReplan({
       display: {
         plan_date: '2026-05-26',
-        updated_at: '2026-05-26T15:00:00.000Z',
+        last_planned_at: '2026-05-26T15:00:00.000Z',
       },
       poll: POLL,
       jstToday: '2026-05-27',
     })).toBe(true);
   });
 
-  it('api changed > display updated → true (mid-day API 변경)', () => {
+  it('api changed > last_planned_at → true (mid-day API 변경)', () => {
     expect(shouldReplan({
       display: {
         plan_date: '2026-05-27',
-        updated_at: '2026-05-27T08:00:00.000Z',
+        last_planned_at: '2026-05-27T08:00:00.000Z',
       },
       poll: POLL, // 09:00
       jstToday: '2026-05-27',
     })).toBe(true);
   });
 
-  it('api changed ≤ display updated, 같은 날: false', () => {
+  it('api changed ≤ last_planned_at, 같은 날: false', () => {
     expect(shouldReplan({
       display: {
         plan_date: '2026-05-27',
-        updated_at: '2026-05-27T10:00:00.000Z',
+        last_planned_at: '2026-05-27T10:00:00.000Z',
       },
       poll: POLL, // 09:00
       jstToday: '2026-05-27',
@@ -267,10 +267,30 @@ describe('shouldReplan', () => {
     expect(shouldReplan({
       display: {
         plan_date: '2026-05-27',
-        updated_at: '2026-05-27T10:00:00.000Z',
+        last_planned_at: '2026-05-27T10:00:00.000Z',
       },
       poll: { last_api_changed_at: null },
       jstToday: '2026-05-27',
     })).toBe(false);
+  });
+
+  // 2026-05-28 회귀: executor가 매 step마다 display.updated_at을 advance해도
+  // last_planned_at은 그대로 유지되어야 replan 판정이 정확하다. last_planned_at은
+  // planner UPSERT 시점에만 갱신되므로 executor 활동에 영향받지 않는 게 입력 자체의
+  // 불변량 — 여기선 그 가정이 깨졌을 때(과거 last_planned_at + 최신 last_api_changed_at)
+  // 정확히 replan이 트리거되는지 확인.
+  it('회귀: API 변경 후 executor가 여러 번 step을 친 상황에서도 replan 트리거', () => {
+    expect(shouldReplan({
+      display: {
+        plan_date: '2026-05-28',
+        // 어제 자정 planner가 박은 last_planned_at
+        last_planned_at: '2026-05-27T15:00:00.000Z',
+      },
+      poll: {
+        // 오늘 한 번이라도 API 값이 변하면
+        last_api_changed_at: '2026-05-28T01:16:20.799Z',
+      },
+      jstToday: '2026-05-28',
+    })).toBe(true);
   });
 });

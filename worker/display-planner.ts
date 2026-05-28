@@ -39,7 +39,7 @@ interface DisplayStateRow {
   channel_id: string;
   display_subscriber_count: number;
   plan_date: string;
-  updated_at: string;
+  last_planned_at: string;
 }
 
 // noop 채널 — channels 테이블에 있지만 아직 poll_state 시드 안 됨.
@@ -61,7 +61,7 @@ const SELECT_POLL_STATE = `
 `;
 
 const SELECT_DISPLAY_STATE = `
-  SELECT channel_id, display_subscriber_count, plan_date, updated_at
+  SELECT channel_id, display_subscriber_count, plan_date, last_planned_at
   FROM   display_state
   WHERE  channel_id = ?
 `;
@@ -75,16 +75,23 @@ const SELECT_MILESTONES = `
 `;
 
 // display_state UPSERT — 신규는 INSERT(display = api), 기존은 UPDATE
-// (display_subscriber_count 유지). applied_change_count는 항상 0으로 리셋
+// (display_subscriber_count는 max(stored, api)로 — api 아래에 갇혀 있던 값은
+// 끌어올리고, 정상값은 유지). applied_change_count는 항상 0으로 리셋
 // (day rollover든 mid-day API 변경 replan이든 새 계획으로 교체).
+//
+// last_planned_at은 planner 전용 timestamp — executor의 매 step UPDATE는 절대
+// 이걸 건드리지 않는다. shouldReplan이 last_api_changed_at과 정확히 비교할 수
+// 있게 만들어진 컬럼. updated_at은 화면 forward-projection의 reference time
+// 용도라 executor가 갱신해야 함.
 const UPSERT_DISPLAY_STATE = `
   INSERT INTO display_state (
     channel_id, display_subscriber_count, target_subscriber_count,
     cap_subscriber_count, today_delta, change_count, applied_change_count,
     next_change_at, last_changed_at, last_change_direction,
-    plan_date, updated_at, created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, ?)
+    plan_date, last_planned_at, updated_at, created_at
+  ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, ?, ?)
   ON CONFLICT(channel_id) DO UPDATE SET
+    display_subscriber_count = excluded.display_subscriber_count,
     target_subscriber_count = excluded.target_subscriber_count,
     cap_subscriber_count    = excluded.cap_subscriber_count,
     today_delta             = excluded.today_delta,
@@ -92,6 +99,7 @@ const UPSERT_DISPLAY_STATE = `
     applied_change_count    = 0,
     next_change_at          = excluded.next_change_at,
     plan_date               = excluded.plan_date,
+    last_planned_at         = excluded.last_planned_at,
     updated_at              = excluded.updated_at
 `;
 
@@ -143,7 +151,12 @@ export function planAllActiveChannels(now: Date = new Date()): PlanStats {
     const api = poll.api_subscriber_count;
     // cap_subscriber_count는 M2에서 함께 박혔지만 NULL 보호.
     const cap = poll.cap_subscriber_count ?? api;
-    const currentDisplay = display?.display_subscriber_count ?? api;
+    // display는 api 아래로 내려가지 않는다. 회귀 수정 이전 데이터(planner가
+    // skip되어 cap이 옛 값에 갇혀 display가 api보다 뒤처진 행)는 replan 시
+    // api까지 끌어올린다 — 표시값을 api 아래로 두는 건 사용자가 보는 절대
+    // 거짓이라 한 번에 따라잡는 게 맞다.
+    const storedDisplay = display?.display_subscriber_count ?? api;
+    const currentDisplay = Math.max(storedDisplay, api);
 
     const milestones = selectMilestones.all(channelId, cutoff) as MilestoneRow[];
     const delta = computeExpectedDailyDelta(milestones, { now, halfLifeDays: halfLife });
@@ -178,8 +191,9 @@ export function planAllActiveChannels(now: Date = new Date()): PlanStats {
       changeCount,
       nextChangeAt,
       jstToday,
-      nowIso,
-      nowIso,
+      nowIso, // last_planned_at
+      nowIso, // updated_at
+      nowIso, // created_at (INSERT만 적용)
     );
     stats.planned++;
   }

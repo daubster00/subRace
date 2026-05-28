@@ -110,7 +110,7 @@ export function pickFirstIntervalMs(opts: {
 }
 
 export interface ShouldReplanInput {
-  display: { plan_date: string; updated_at: string } | null;
+  display: { plan_date: string; last_planned_at: string } | null;
   poll: { last_api_changed_at: string | null };
   jstToday: string;
 }
@@ -118,14 +118,19 @@ export interface ShouldReplanInput {
 // 재계획 조건 (active_plan §M4):
 //   (a) display 없음 — 신규 채널 첫 진입
 //   (b) plan_date != today — JST 자정 리셋
-//   (c) poll.last_api_changed_at > display.updated_at — mid-day API 변경
+//   (c) poll.last_api_changed_at > display.last_planned_at — mid-day API 변경
+//
+// updated_at이 아니라 last_planned_at을 쓰는 이유: executor가 매 step마다
+// updated_at을 advance시키기 때문에 API 변경 직후 첫 executor tick이 돌고 나면
+// last_api_changed_at < updated_at이 되어 replan이 영구히 skip 됐다. cap이 옛
+// 값에 갇히고 display가 api를 따라잡지 못하던 회귀의 원인.
 export function shouldReplan({ display, poll, jstToday }: ShouldReplanInput): boolean {
   if (!display) return true;
   if (display.plan_date !== jstToday) return true;
   if (poll.last_api_changed_at) {
     const changed = new Date(poll.last_api_changed_at).getTime();
-    const updated = new Date(display.updated_at).getTime();
-    if (changed > updated) return true;
+    const planned = new Date(display.last_planned_at).getTime();
+    if (changed > planned) return true;
   }
   return false;
 }
