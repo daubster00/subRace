@@ -21,7 +21,7 @@ const DISPLAY_COUNTS_TTL_MS = 24 * 60 * 60 * 1000;
 const DISPLAY_COUNTS_SAVE_INTERVAL_MS = 2_000;
 const MIN_STEP_MS = 650;
 const MAX_STEP_MS = 1_400;
-const MAX_ACTIVE_MOTIONS = 15;
+const MAX_ACTIVE_MOTIONS = 30;
 
 // 채널의 growthRatePerHour로 모션 빈도를 결정. 변동 큰 채널은 자주, 정체
 // 채널은 드물게 → ISSEI(1,374/h) 같은 핫 채널이 모션 큐를 잡고 늘어지는 일
@@ -55,7 +55,7 @@ function getMotionCadence(growthRatePerHour: number | null): MotionCadence {
 // 여러 채널이 동시에 모션을 시작해 어색하게 보이는 것을 막는다.
 // 상한은 "전체 뷰에서 변화가 멈춰 있는 최대 시간"을 직접 결정한다 — 3초 미만으로 유지.
 const MIN_NEW_MOTION_GAP_MS = 220;
-const MAX_NEW_MOTION_GAP_MS = 2_400;
+const MAX_NEW_MOTION_GAP_MS = 1_800;
 
 interface MotionState {
   nextDecisionAt: number;
