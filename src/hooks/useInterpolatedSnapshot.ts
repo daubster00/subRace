@@ -55,7 +55,7 @@ function getMotionCadence(growthRatePerHour: number | null): MotionCadence {
 // 여러 채널이 동시에 모션을 시작해 어색하게 보이는 것을 막는다.
 // 상한은 "전체 뷰에서 변화가 멈춰 있는 최대 시간"을 직접 결정한다 — 3초 미만으로 유지.
 const MIN_NEW_MOTION_GAP_MS = 220;
-const MAX_NEW_MOTION_GAP_MS = 1_800;
+const MAX_NEW_MOTION_GAP_MS = 1_100;
 
 interface MotionState {
   nextDecisionAt: number;
