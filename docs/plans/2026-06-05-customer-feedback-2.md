@@ -313,3 +313,121 @@ Claude는 사전에 우선순위/그룹/일정을 정하지 않는다.
 - **이 프로젝트는 가짜 움직임이 진짜처럼 보이게 만드는 것**이 본질. "데이터 없으면 멈춰" 같은 발상 금지.
 - 폴링 주기는 사용자 설정값. 운영 2분. env default 6시간 무시. ([[polling_interval]])
 - 코드 변경 전에 반드시 사용자 확인. 이전 세션에서 합의 없이 진도 빼다가 전부 revert함.
+
+---
+
+## 클라이언트 표시값 단순화 (M6 컷오버)
+
+### 배경
+
+서버가 `display_state.display_subscriber_count`를 권위 있는 단일 출처로 관리하고, `/api/snapshot`이 모든 클라이언트에 동일한 값을 내려준다. 그러나 현재 `useInterpolatedSnapshot` 훅이 그 위에 `Math.random()` 기반 드리프트와 브라우저별 localStorage를 얹어, 폴링 사이 구간에서 브라우저마다 표시 숫자가 달라지는 문제가 있다. 이는 의도된 설계가 아니라 2세대→3세대 마이그레이션 중 미완료 상태다.
+
+### 목표
+
+어느 브라우저, 어느 시점에 접속해도 동일한 구독자 숫자가 표시되어야 한다. 숫자의 "진실"은 서버 스케줄이 결정하고, 클라이언트는 그 값을 렌더링만 한다.
+
+### 제거 대상
+
+- `useInterpolatedSnapshot.ts`의 `Math.random()` 드리프트 로직 전체 (stepNaturalCount / stepFlatCount / amplitude oscillation)
+- `localStorage` 영속화 (`subRace:displayCounts:v2` 키, 24h TTL 저장/복원 로직)
+
+### 유지 대상
+
+- 서버에서 내려온 `display_subscriber_count` → 화면 표시값으로 직접 사용
+- **숫자 애니메이션은 클라이언트에서 처리**: "이전 서버값 → 새 서버값" 사이를 부드럽게 보간 (폴링 주기 내 RAF lerp). 숫자가 자연스럽게 올라가거나 내려가는 효과만 담당
+- 폴링 주기(현재 30초)는 유지
+
+### 구현 순서
+
+새 아키텍처에서 서버 스케줄러와 함께 묶어서 구현한다.
+
+1. 서버: DB 스키마 신설 (이벤트 스케줄 테이블 + `display_state.next_cycle_reset_at`)
+2. 서버: display-planner 재작성 (사전 스케줄 방식)
+3. 서버: display-executor 재작성 (스케줄 소비 방식)
+4. 클라이언트: `useInterpolatedSnapshot` 단순화 (드리프트/localStorage 제거, 서버값 직접 렌더 + lerp 애니메이션만 유지)
+
+클라이언트 단순화(4번)는 서버 스케줄러(1~3번) 완료 후 진행한다. 서버가 촘촘한 스케줄을 내려주지 않는 상태에서 클라이언트 드리프트를 제거하면 화면이 30초마다 툭툭 끊겨 보이기 때문이다.
+
+### 주의
+
+- 기존 `useInterpolatedSnapshot`의 correction lerp(서버값으로 수렴하는 1.5s 전환) 패턴은 새 lerp 애니메이션의 참고 구현으로 활용
+- 애니메이션 방향: 상승 시 위로, 하락 시 아래로 (고객 수정요청사항 항목 1)
+
+---
+
+## 신규 아키텍처 전환 시 지뢰 분석
+
+### 재작성 vs 수정 판정
+
+| 대상 | 판정 | 이유 |
+|---|---|---|
+| `src/lib/display-execute.ts` | **완전 재작성** | 실행 시점 랜덤 결정 전체가 폐기 대상 |
+| `src/lib/display-plan.ts` | **완전 재작성** | 구조 자체가 하루(자정/24h) 모양. JST 자정 의존 헬퍼 전체 사장 |
+| `worker/display-executor.ts` | **완전 재작성** | "결정+적용" → "예약 이벤트 소비"로 역할 역전. 쿼리 완전 교체 |
+| `src/lib/milestone-delta.ts` | **재작성** | half-life 회귀 폐기 → 마일스톤 간격 순서 기반 선형 가중으로 교체 |
+| `worker/display-planner.ts` | **골격 재사용 + 계산부 재작성** | 랭킹 순회, poll_state/display_state UPSERT 골격 유지. 계획 알고리즘만 교체 |
+| `worker/scheduler.ts` | **현행 유지** | 60초 틱 single-flight 하니스 그대로 |
+| `src/lib/snapshot.ts` | **경미 수정(additive)** | `last_change_direction` / `last_changed_at` 응답 추가. COALESCE 계약 유지 |
+| `src/app/api/events/route.ts` | **현행 유지** | 배포 auto-reload 전용. 데이터 푸시 승격은 별도/선택 |
+| `migrations/` | **010부터 additive 추가** | 이벤트 스케줄 테이블 + display_state 컬럼 ADD. 사장 컬럼은 deprecated 주석 후 별도 마이그레이션에서 DROP |
+| `src/hooks/useInterpolatedSnapshot.ts` | **재작성(M6 컷오버)** | 서버 스케줄러 1~3 완료 후 진행 |
+
+### display_state 컬럼 변화
+
+| 컬럼 | 판정 | 비고 |
+|---|---|---|
+| `display_subscriber_count`, `channel_id`, `updated_at`, `created_at` | ✅ 유지 | 계약 불변 |
+| `last_changed_at`, `last_change_direction` | ✅ 유지 | M6에서 snapshot 응답에 추가 필요 (지뢰③ 참고) |
+| `target_subscriber_count` | ⚠️ 산출식 재정의 | 현재: min(display+dailyDelta, cap) → 새: milestone + 0.95×(milestone−prev) |
+| `cap_subscriber_count` | ⚠️ 재정의 | 현재 0.85 cap → 새 "API 추월 금지" 기준으로 교체 |
+| `change_count`, `applied_change_count` | ⚠️ 사장 예정 | 이벤트 테이블로 이동. 즉시 DROP 금지, deprecated 후 정리 |
+| `today_delta` | ❌ 사장 | "today" 하루 프레임 자체 폐기 |
+| `next_change_at` | ❌ 사장(or 캐시) | 스케줄 테이블 단일 출처로 대체 |
+| `plan_date` | ❌ 사장 | JST 자정 기반. next_cycle_reset_at으로 대체 |
+| `last_planned_at` | ⚠️ 로직 변경 | 자정 replan → 사이클 reset + API 변경 비교로 교체 |
+| **`next_cycle_reset_at`** | 🆕 신설 | 채널별 1시간 롤링 사이클 기준 시각 |
+| **`phase`** | 🆕 신설 | `catch-up` / `target-bounce` / `normal`. catch-up 중 up/down 비율이 다름 |
+
+### 진짜 지뢰 3개
+
+#### ① 이중 실행 (가장 위험)
+이벤트 스케줄 테이블 신설 시 기존 `display_state.next_change_at`과 "다음 이벤트 출처"가 둘이 되면 같은 이벤트가 두 번 적용될 수 있다. 해결 원칙:
+- 스케줄 테이블이 단일 출처. `next_change_at`은 deprecated/캐시로 격하 또는 제거.
+- 재시작 시: 해당 채널의 미적용 이벤트(`applied=0`) 전체 DELETE → 즉시 재계획을 **한 트랜잭션** 안에서 처리. 두 단계가 분리되면 worker 재시작 타이밍에 이중 실행 발생.
+- `shouldReplan` 교훈: executor가 갱신하는 타임스탬프(`updated_at`)와 재계획 트리거를 비교하면 안 됨. `next_cycle_reset_at`은 executor가 절대 건드리지 않는 전용 컬럼이어야 함.
+
+#### ② 마일스톤 6개 미만 채널 (터짐 범위 한정)
+새 규칙 3(마일스톤 간격 기반 속도 계산)은 최소 6개 마일스톤을 요구. **6개 이상 채널(141개)은 정상 작동. 터지는 건 6개 미만 채널(11개)만.**
+
+현재 해당 채널:
+- 마일스톤 0개: せんももあいしーチャンネル(22위), 恋愛とと(24위), Yuka Kinoshita(71위), 圧倒的不審者の極み!(143위)
+- 마일스톤 1~3개: JunsKitchen(70위), fumikiri channel(138위), スカイピース(94위), ノッカーナアニメーション(111위)
+- 마일스톤 9~10개: HidaMari Cooking(91위), Kids Line(15위), 水溜りボンド(104위)
+
+이 채널들의 동작 정의가 구현 전에 반드시 필요. 미정의 시 divide-by-zero / NaN → 해당 채널만 표시 고장. **구현 전 사용자 확인 필요.**
+
+**결정 (2026-06-06): 마일스톤 6개 미만 채널 → YouTube API 실제 구독자 수 고정 표시**
+
+구현 방식:
+- `poll_state.api_subscriber_count` 값을 `display_subscriber_count`로 그대로 사용
+- 사전 스케줄 생성 없음. 이벤트 스케줄 테이블에 해당 채널 행 없음
+- planner가 이 채널들을 감지하면 스케줄 생성 대신 `display_subscriber_count = api_subscriber_count`로 upsert 후 skip
+- YouTube API 폴링으로 실제 값이 바뀌면 다음 planner 틱에 자동 반영
+- 클라이언트는 동일하게 처리 (lerp 애니메이션만 — 이전값→새값 부드럽게)
+- phase = `'fixed'` (신설. catch-up/target-bounce/normal과 구분)
+
+해당 채널 (마일스톤 0~3개, 8개):
+せんももあいしーチャンネル(22위), 恋愛とと(24위), Yuka Kinoshita(71위), 圧倒的不審者の極み!(143위), JunsKitchen(70위), fumikiri channel(138위), スカイピース(94위), ノッカーナアニメーション(111위)
+
+※ HidaMari(9개), Kids Line(10개), 水溜りボンド(10개)는 6개 이상이라 정상 스케줄 적용.
+
+#### ③ 모션 방향 부재 (M6 선행 조건)
+클라이언트 드리프트를 제거하면 상승/하락 방향 정보가 서버에서 와야 한다. 그러나 현재 `/api/snapshot` 응답(`snapshot.ts ChannelSchema`)에 `last_change_direction` / `last_changed_at`이 없다. M6 진입 전 snapshot 응답에 두 컬럼 추가가 반드시 선행되어야 함. 추가 자체는 additive라 가벼움.
+
+### JST 자정 의존 제거 범위
+`getMsUntilJstMidnight`, `getJstDate` 헬퍼 + executor의 `plan_date` 필터 + planner의 `getJstDate` 호출 전체가 새 방식(채널별 1시간 롤링)으로 교체 대상. 현재 `display-plan.ts`가 이 의존성의 핵심이라 재작성 시 연쇄 제거됨.
+
+### env.ts 정리 대상
+사장: `CHANGE_BIAS_*`, `change_count` bounds(30~720 day 기반)
+신설: 시간당 이벤트 수, magnitude 상한(≤20), jitter 범위, 휴식 구간 파라미터
+주의: 기존 한도값(30/720)을 새 설계에 끌어오지 않을 것.
