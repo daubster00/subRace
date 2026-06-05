@@ -121,7 +121,7 @@ Claude는 사전에 우선순위/그룹/일정을 정하지 않는다.
 **이 방향으로 해결되는 고객 항목**: 1, 4, 6, 11 (구조적 해결). 5도 일부 흡수.
 
 **별개로 봐야 하는 항목** (이 아키텍처 안 거치는 것):
-- 항목 2 (My No War 마일스톤 누락): UNIQUE INDEX `(channel_id, subscriber_count)` dedup 우회 문제. 별도 처리.
+- 항목 2 (My No War 마일스톤 누락): UNIQUE INDEX dedup 우회 — commit `0af5ea7`로 완료.
 - 항목 3 (Yuka 감소 채널): pace 산출 시 옛 데이터라도 부호 살리는 방향 — 이 아키텍처에선 pace를 정확히 잡는 게 시간 스케줄의 입력이 되므로 같이 다뤄야 함.
 - 항목 7·8·12 (pace 계산 방식): 위 아키텍처의 "현재 pace × 1h" 부분의 pace를 어떻게 산출할지의 세부. 다음 협의에서.
 - 항목 9 (큰 감소는 실제 API 하락 확인 시): catch-up 로직과 같이 검토.
@@ -132,7 +132,7 @@ Claude는 사전에 우선순위/그룹/일정을 정하지 않는다.
 - 1시간 vs 15분 단위
 - ~~방향 비율 80/20 vs 90/10~~ → 80/20으로 확정 (catch-up 시엔 100/0)
 - pace 산출 방식 (항목 7·8과 연동) → **아래 스케줄링 4규칙으로 확정**
-- 항목 2 dedup 우회 시점 (이 아키텍처 작업 전/중/후)
+- ~~항목 2 dedup 우회 시점~~ → commit `0af5ea7` + 마이그레이션 009로 완료 ✅
 - 스케줄 테이블 스키마
 
 ---
@@ -174,7 +174,7 @@ Claude는 사전에 우선순위/그룹/일정을 정하지 않는다.
 | Top 100 (화면 노출) | **15개** | **필요** — 직전 마일스톤 없어 4규칙 작동 불가 → fallback 동작 정의해야 함 |
 | Top 100 밖 (rank 111~149) | 5개 | 무시 가능 — 화면 안 보이고 시간 지나면 자연 마일스톤 도래 |
 
-**Top 100 1-마일스톤 채널 15개 처리**: 사용자가 직전 마일스톤을 외부 수집해서 수동 입력할 예정. 단, **dedup fix 적용 후**에 import 가능 (값이 진동하는 채널이 다수라 unique index가 막음).
+**Top 100 1-마일스톤 채널 15개 처리**: 사용자가 직전 마일스톤을 외부 수집해서 수동 입력할 예정. dedup fix가 이미 적용되었으므로(commit `0af5ea7`) 진동 데이터 포함해서 바로 import 가능.
 
 수동 수집 데이터 (2026-06-05 사용자 제공) — 발견된 진동 패턴:
 - Kids Line♡: 14.1M → 14.2M → 14.1M (1회 진동)
@@ -210,12 +210,12 @@ Claude는 사전에 우선순위/그룹/일정을 정하지 않는다.
 
 **시간당 최소 이벤트 수 (확정)**: **N = 6** (평균 10분 간격). 시간당 목표가 작은 느린 채널도 시간 안에 6번은 움직이도록 강제. 80/20 비율로 분배 후 magnitude 조정해서 net 합산이 시간당 목표와 일치.
 
-**항목 2 (마일스톤 dedup) fix — 코드 작업 전에 선행**:
+**항목 2 (마일스톤 dedup) fix — ✅ 완료 (2026-06-05)**:
 - **사용자 원안 정정**: dedup의 본래 의도는 "직전 마일스톤과 같은 값이면 skip" (시간 차원 상관없음). 같은 값이라도 시간 두고 다시 도래하면 새 row로 기록되어야 함.
-- 예: 4월 14.1M → 5월 14.2M → 6월 14.1M = 6월 14.1M도 새 row로 기록.
-- 현재 worker 로직(`worker/youtube-channels.ts:151`)은 이미 poll_state로 직전 값 비교해서 같으면 skip 함. **올바름.**
-- **막고 있는 건 `subscriber_snapshots`의 UNIQUE INDEX `(channel_id, subscriber_count)` 하나뿐** (`migrations/007_milestone_history.sql:43-44`).
-- **Fix = 그 인덱스 DROP**. 또는 `(channel_id, subscriber_count, polled_at)` 으로 변경 (다중 컬럼 unique). 후자가 동시성 중복 방어 유지하면서도 시간 다른 같은 값 허용. **후자 추천.**
+- 현재 worker 로직(`worker/youtube-channels.ts:151`)은 이미 poll_state로 직전 값 비교해서 같으면 skip — **올바름**.
+- 막고 있던 건 `subscriber_snapshots`의 UNIQUE INDEX `(channel_id, subscriber_count)` 하나였음.
+- **별도 세션에서 처리 완료**: commit `0af5ea7` (feat: 마일스톤 재진입 허용 — UNIQUE 해제) + 마이그레이션 009 (`migrations/009_drop_milestone_uniqueness.sql`, 008→009 번호 충돌 정정 ae670bc).
+- 이제 같은 채널의 같은 구독자 값이 시간 두고 다시 도래하면 새 row로 기록됨. 진동 채널 정상 처리.
 
 **DB 스키마 신설**: 이벤트 스케줄 테이블 1개 추가 (channel_id, scheduled_at, magnitude, direction, applied flag). 시간 단위 결정(1시간)에 맞춰 설계.
 
