@@ -31,21 +31,14 @@ const envSchema = z.object({
   YOUTUBE_LIKES_POLL_INTERVAL_HOURS: z.coerce.number().min(0.01).default(0.5),
   SURGE_WINDOW_HOURS: z.coerce.number().min(0.01).default(24),
   ESTIMATION_SAFETY_RATIO: z.coerce.number().min(0).max(1).default(0.85),
-  // 마일스톤 회귀 계산 (src/lib/milestone-delta.ts).
-  // - WINDOW: 회귀에 사용할 과거 기간. 너무 좁으면 표본 부족, 너무 넓으면
-  //   채널의 옛 페이스가 추세에 끼어듦. 가중치가 지수 감쇠라 실질 무게는
-  //   최근 30~60일에 쏠림.
-  // - HALF_LIFE: 가중치 반감기. 30일 전 행은 어제 행의 1/2 무게,
-  //   60일 전 행은 1/4, 90일 전 행은 1/8.
+  // DEPRECATED (2026-06-06, BUG-01): 구 half-life 회귀 전용. 새 pace 알고리즘은
+  // 날짜 무관·최근 N개 순서 기반이라 planner가 더 이상 참조하지 않는다 (날짜
+  // window가 과거 마일스톤을 굶겨 fixed 오분류를 만든 원인). .env 호환 위해
+  // schema에만 남김 (별도 정리 예정).
   MILESTONE_HISTORY_WINDOW_DAYS: z.coerce.number().int().min(1).default(120),
   MILESTONE_WEIGHT_HALF_LIFE_DAYS: z.coerce.number().min(0.1).default(30),
-  // M4 display-planner.
-  // - INTERVAL: scheduler가 planAllActiveChannels()를 호출하는 주기. 5분이면
-  //   하루 288회 검사. 대부분 채널은 shouldReplan=false라 비용은 작음.
-  // - JITTER_RATIO: 평균 간격 ±N 분산. 0.5면 [0.5×avg, 1.5×avg]. 0이면 균등.
-  // - CHANGE_BIAS_*는 M5 executor가 증가/감소 이벤트 비율을 정할 때 사용.
-  //   planner는 today_delta 부호로 추세만 정하고, 이벤트별 방향은 executor가
-  //   bias 범위에서 랜덤 선택. (스펙 L282~290)
+  // DEPRECATED (2026-06-06, BUG-02): 구 주기적 planner 주기. 채널별 독립
+  // 타이머(channel-scheduler.ts)로 전환 후 더 이상 참조 안 함. schema에만 남김.
   DISPLAY_PLANNER_INTERVAL_MINUTES: z.coerce.number().min(1).default(5),
   // DEPRECATED (2026-06-06): 구 M5 랜덤 executor 전용. 사전 스케줄 전환 후
   // 어떤 코드도 참조하지 않음. .env 호환 위해 schema에만 남김 (별도 정리 예정).
