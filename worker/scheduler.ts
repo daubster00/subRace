@@ -90,9 +90,9 @@ export function startScheduler(): void {
   const runPlanner = createSingleFlight(async () => {
     try {
       const stats = planAllActiveChannels();
-      if (stats.planned > 0 || stats.noPollState > 0) {
+      if (stats.planned > 0 || stats.fixed > 0 || stats.noPollState > 0) {
         console.log(
-          `[worker] display_planner_tick considered=${stats.considered} planned=${stats.planned} skipped=${stats.skipped} no_poll_state=${stats.noPollState}`,
+          `[worker] display_planner_tick considered=${stats.considered} planned=${stats.planned} fixed=${stats.fixed} skipped=${stats.skipped} no_poll_state=${stats.noPollState}`,
         );
       }
     } catch (err) {
@@ -109,7 +109,7 @@ export function startScheduler(): void {
       const stats = executePendingChanges();
       if (stats.executed > 0) {
         console.log(
-          `[worker] display_executor_tick due=${stats.due} executed=${stats.executed} noop=${stats.noopDelta} finalized=${stats.finalized}`,
+          `[worker] display_executor_tick due=${stats.due} executed=${stats.executed} channels=${stats.channels} noop=${stats.noopDelta}`,
         );
       }
     } catch (err) {

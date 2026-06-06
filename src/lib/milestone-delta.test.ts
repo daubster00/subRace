@@ -1,141 +1,73 @@
 import { describe, it, expect } from 'vitest';
 import {
-  weightedLeastSquaresSlope,
-  computeExpectedDailyDelta,
-  type RegressionPoint,
+  computeMilestoneTarget,
+  computePredictedHoursToNextMilestone,
   type MilestoneRow,
 } from './milestone-delta';
 
-const HALF_LIFE = 30;
+const HOUR = 3_600_000;
 
-function mkPoint(ageDays: number, count: number, halfLifeDays = HALF_LIFE): RegressionPoint {
-  return {
-    x: -ageDays,
-    y: count,
-    weight: Math.exp(-Math.max(0, ageDays) / halfLifeDays),
-  };
+function row(hoursAgoFromBase: number, count: number, base = Date.parse('2026-06-06T00:00:00.000Z')): MilestoneRow {
+  return { polled_at: new Date(base + hoursAgoFromBase * HOUR).toISOString(), subscriber_count: count };
 }
 
-// 절대 시각으로 만든 행(now 기준 ageDays 전 polled_at).
-function mkRow(now: Date, ageDays: number, count: number): MilestoneRow {
-  return {
-    polled_at: new Date(now.getTime() - ageDays * 86_400_000).toISOString(),
-    subscriber_count: count,
-  };
-}
-
-describe('weightedLeastSquaresSlope', () => {
-  it('완전 선형 +10/day 증가: 기울기 정확히 10', () => {
-    // age=0 → y=1000, age=10 → y=900, ... → newer가 더 큼 → +10/day
-    const points = [0, 10, 20, 30, 60].map((age) => mkPoint(age, 1000 - age * 10));
-    const slope = weightedLeastSquaresSlope(points);
-    expect(slope).not.toBeNull();
-    expect(slope!).toBeCloseTo(10, 6);
+describe('computeMilestoneTarget (규칙 4)', () => {
+  it('상승: target = latest + 0.95×(latest−prev)', () => {
+    const rows = [row(0, 5_680_000), row(1, 5_690_000)];
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.latest).toBe(5_690_000);
+    expect(t.prev).toBe(5_680_000);
+    expect(t.trendSign).toBe(1);
+    expect(t.target).toBe(5_699_500); // 5,690,000 + 0.95×10,000
   });
 
-  it('완전 선형 -5/day 감소: 기울기 정확히 -5', () => {
-    const points = [0, 10, 20, 30].map((age) => mkPoint(age, 1000 + age * 5));
-    const slope = weightedLeastSquaresSlope(points);
-    expect(slope).not.toBeNull();
-    expect(slope!).toBeCloseTo(-5, 6);
+  it('하락: 음수 step → target 아래로', () => {
+    const rows = [row(0, 626_000), row(1, 625_000)];
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.trendSign).toBe(-1);
+    expect(t.target).toBe(624_050); // 625,000 + 0.95×(−1,000)
   });
 
-  it('표본 < 3 → null', () => {
-    expect(weightedLeastSquaresSlope([])).toBeNull();
-    expect(weightedLeastSquaresSlope([mkPoint(0, 100)])).toBeNull();
-    expect(weightedLeastSquaresSlope([mkPoint(0, 100), mkPoint(10, 90)])).toBeNull();
+  it('latest와 같은 값이 연속이면 값이 다른 직전 마일스톤을 prev로 찾는다', () => {
+    // 진동 재진입: 5680 → 5690 → 5690 (같은 값 재도래)
+    const rows = [row(0, 5_680_000), row(1, 5_690_000), row(2, 5_690_000)];
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.prev).toBe(5_680_000);
+    expect(t.trendSign).toBe(1);
   });
 
-  it('모든 x 동일(시간 축 분산 0) → null', () => {
-    const points: RegressionPoint[] = [
-      { x: 0, y: 100, weight: 1 },
-      { x: 0, y: 200, weight: 1 },
-      { x: 0, y: 300, weight: 1 },
-    ];
-    expect(weightedLeastSquaresSlope(points)).toBeNull();
+  it('모든 값 동일 → trendSign 0, target = latest', () => {
+    const rows = [row(0, 5_000_000), row(1, 5_000_000)];
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.trendSign).toBe(0);
+    expect(t.target).toBe(5_000_000);
   });
 
-  it('최근 가속: 가중치가 최근 기울기 쪽으로 끌어당김', () => {
-    // 오래된 구간(age 60~90): +5/day
-    // 최근 구간(age 0~30): +20/day
-    // uniform 평균 ≈ 15, half-life=30이면 slope > 15
-    const points: RegressionPoint[] = [
-      mkPoint(90, 1000),
-      mkPoint(75, 1075),
-      mkPoint(60, 1150),
-      mkPoint(30, 1750),
-      mkPoint(15, 2050),
-      mkPoint(0,  2350),
-    ];
-    const slope = weightedLeastSquaresSlope(points);
-    expect(slope).not.toBeNull();
-    expect(slope!).toBeGreaterThan(15);
-    expect(slope!).toBeLessThanOrEqual(20);
-  });
-
-  it('half-life가 매우 크면(가중치 거의 균일) 단순 회귀와 같음', () => {
-    const points = [0, 10, 20, 30, 40].map((age) => mkPoint(age, 1000 - age, 1e9));
-    const slope = weightedLeastSquaresSlope(points);
-    expect(slope!).toBeCloseTo(1, 6);
-  });
-
-  it('V자 추세 + 최근 가중: 최근 회복 방향(양수)으로 잡힘', () => {
-    // age 60→30: -10/day 하락, age 30→0: +10/day 회복
-    // uniform 평균 ≈ 0, half-life=20이면 최근 회복에 끌려 slope > 0
-    const halfLife = 20;
-    const points: RegressionPoint[] = [
-      mkPoint(60, 1300, halfLife),
-      mkPoint(45, 1150, halfLife),
-      mkPoint(30, 1000, halfLife),
-      mkPoint(15, 1150, halfLife),
-      mkPoint(0,  1300, halfLife),
-    ];
-    const slope = weightedLeastSquaresSlope(points);
-    expect(slope).not.toBeNull();
-    expect(slope!).toBeGreaterThan(0);
+  it('빈 배열 → null', () => {
+    expect(computeMilestoneTarget([], 0.95)).toBeNull();
   });
 });
 
-describe('computeExpectedDailyDelta', () => {
-  const NOW = new Date('2026-05-27T00:00:00.000Z');
-
-  it('완전 선형 +1000/day: expectedDailyDelta ≈ 1000', () => {
-    const rows = [0, 10, 20, 30, 60].map((age) => mkRow(NOW, age, 100_000 - age * 1000));
-    const result = computeExpectedDailyDelta(rows, { now: NOW, halfLifeDays: HALF_LIFE });
-    expect(result).not.toBeNull();
-    expect(result!.expectedDailyDelta).toBeCloseTo(1000, 3);
-    expect(result!.sampleCount).toBe(5);
-    expect(result!.halfLifeDays).toBe(HALF_LIFE);
+describe('computePredictedHoursToNextMilestone (규칙 3)', () => {
+  it('단일 간격: 그 간격 그대로', () => {
+    const rows = [row(0, 100), row(2, 110)]; // 2시간 간격
+    expect(computePredictedHoursToNextMilestone(rows, { maxIntervals: 8 })).toBeCloseTo(2, 6);
   });
 
-  it('표본 < 3 → null', () => {
-    expect(computeExpectedDailyDelta([], { now: NOW, halfLifeDays: HALF_LIFE })).toBeNull();
-    expect(computeExpectedDailyDelta(
-      [mkRow(NOW, 0, 100), mkRow(NOW, 10, 90)],
-      { now: NOW, halfLifeDays: HALF_LIFE },
-    )).toBeNull();
+  it('최신 간격에 더 큰 weight (순서 기반 선형)', () => {
+    // 간격: 1h(옛, weight1), 2h(최신, weight2) → (1×1 + 2×2)/(1+2) = 5/3
+    const rows = [row(0, 100), row(1, 110), row(3, 120)];
+    expect(computePredictedHoursToNextMilestone(rows, { maxIntervals: 8 })).toBeCloseTo(5 / 3, 6);
   });
 
-  it('감소 채널: 음수 expectedDailyDelta', () => {
-    const rows = [0, 10, 20, 30].map((age) => mkRow(NOW, age, 100_000 + age * 500));
-    const result = computeExpectedDailyDelta(rows, { now: NOW, halfLifeDays: HALF_LIFE });
-    expect(result).not.toBeNull();
-    expect(result!.expectedDailyDelta).toBeCloseTo(-500, 3);
+  it('maxIntervals로 최근 간격만 사용', () => {
+    // 간격 4개: 10h, 10h, 1h, 1h. maxIntervals=2면 최근 1h,1h만 → weighted avg 1
+    const rows = [row(0, 1), row(10, 2), row(20, 3), row(21, 4), row(22, 5)];
+    expect(computePredictedHoursToNextMilestone(rows, { maxIntervals: 2 })).toBeCloseTo(1, 6);
   });
 
-  it('미래 날짜 행(SocialBlade 예측) 포함해도 weight clamp되어 과대평가 없음', () => {
-    // age 음수(미래) 1개 + 과거 4개. weight clamp 안 됐다면 미래 row가 ≫1
-    // 가중치로 결과를 끌고 갔을 것. clamp되면 미래 row weight=1, 어제 row와 동급.
-    const rows = [
-      mkRow(NOW, -10, 110_000), // 10일 뒤 SB 예측: 11만
-      mkRow(NOW,   0, 100_000),
-      mkRow(NOW,  10,  90_000),
-      mkRow(NOW,  20,  80_000),
-      mkRow(NOW,  30,  70_000),
-    ];
-    // 5개 행이 정확히 직선(+1000/day) 위에 있으므로 어떤 가중치든 정확히 +1000
-    const result = computeExpectedDailyDelta(rows, { now: NOW, halfLifeDays: HALF_LIFE });
-    expect(result).not.toBeNull();
-    expect(result!.expectedDailyDelta).toBeCloseTo(1000, 3);
+  it('마일스톤 < 2개 → null', () => {
+    expect(computePredictedHoursToNextMilestone([row(0, 100)], { maxIntervals: 8 })).toBeNull();
+    expect(computePredictedHoursToNextMilestone([], { maxIntervals: 8 })).toBeNull();
   });
 });

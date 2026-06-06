@@ -47,11 +47,32 @@ const envSchema = z.object({
   //   planner는 today_delta 부호로 추세만 정하고, 이벤트별 방향은 executor가
   //   bias 범위에서 랜덤 선택. (스펙 L282~290)
   DISPLAY_PLANNER_INTERVAL_MINUTES: z.coerce.number().min(1).default(5),
+  // DEPRECATED (2026-06-06): 구 M5 랜덤 executor 전용. 사전 스케줄 전환 후
+  // 어떤 코드도 참조하지 않음. .env 호환 위해 schema에만 남김 (별도 정리 예정).
   CHANGE_BIAS_UP_INCREASE_MIN: z.coerce.number().min(0).max(1).default(0.75),
   CHANGE_BIAS_UP_INCREASE_MAX: z.coerce.number().min(0).max(1).default(0.90),
   CHANGE_BIAS_DOWN_DECREASE_MIN: z.coerce.number().min(0).max(1).default(0.60),
   CHANGE_BIAS_DOWN_DECREASE_MAX: z.coerce.number().min(0).max(1).default(0.85),
   CHANGE_INTERVAL_JITTER_RATIO: z.coerce.number().min(0).max(0.99).default(0.50),
+  // 사전 스케줄 아키텍처 (2026-06-06, customer-feedback-2).
+  // - MIN_MILESTONES: 이보다 적은 마일스톤 채널은 phase='fixed' (api값 고정 표시).
+  // - MIN_EVENTS: 1시간 사이클 최소 이벤트 수 (느린 채널도 안 멈추게).
+  // - MAX_MAGNITUDE: 이벤트당 절대 상한 (한 번에 ±20 초과 금지, 항목 4).
+  // - COUNTER_RATIO: 반대 방향 이벤트 비율 (정상 0.20, catch-up은 코드에서 0).
+  // - CYCLE_HOURS: 채널별 롤링 사이클 길이.
+  // - TARGET_RATIO: target = 마일스톤 + ratio×(새−직전) (항목 12, 0.85→0.95).
+  // - BOUNCE_STEP_RATIO: target 도달 후 진동 폭 = ratio × bucket unit (±3%).
+  // - PACE_MAX_INTERVALS: 예상 도달 시간 산출에 쓸 최근 인접 간격 최대 수.
+  // - EVENT_JITTER_RATIO: 이벤트 시각 분산 비율.
+  SCHEDULE_MIN_MILESTONES: z.coerce.number().int().min(2).default(6),
+  SCHEDULE_MIN_EVENTS: z.coerce.number().int().min(1).default(6),
+  SCHEDULE_MAX_MAGNITUDE: z.coerce.number().int().min(1).default(20),
+  SCHEDULE_COUNTER_RATIO: z.coerce.number().min(0).max(0.5).default(0.20),
+  SCHEDULE_CYCLE_HOURS: z.coerce.number().min(0.1).default(1),
+  SCHEDULE_TARGET_RATIO: z.coerce.number().min(0).max(2).default(0.95),
+  SCHEDULE_BOUNCE_STEP_RATIO: z.coerce.number().min(0).max(1).default(0.03),
+  SCHEDULE_PACE_MAX_INTERVALS: z.coerce.number().int().min(1).default(8),
+  SCHEDULE_EVENT_JITTER_RATIO: z.coerce.number().min(0).max(1).default(0.5),
   RANK_ALERT_ABSOLUTE_THRESHOLD: z.coerce.number().int().min(0).default(3000),
   RANK_ALERT_TIME_THRESHOLD_HOURS: z.coerce.number().min(0).default(0.25),
   LIVE_VIEWER_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(1).default(60),
