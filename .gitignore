@@ -74,3 +74,9 @@ _seed_test.ts
 
 # server-side deploy config (SSH alias + remote path)
 .env.deploy
+
+# 임시 스크래핑 산출물
+sb_next_data.json
+sb_test.html
+.claude/scheduled_tasks.lock
+data/sb-rescrape-report-*.json
