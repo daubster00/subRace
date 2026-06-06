@@ -431,3 +431,78 @@ Claude는 사전에 우선순위/그룹/일정을 정하지 않는다.
 사장: `CHANGE_BIAS_*`, `change_count` bounds(30~720 day 기반)
 신설: 시간당 이벤트 수, magnitude 상한(≤20), jitter 범위, 휴식 구간 파라미터
 주의: 기존 한도값(30/720)을 새 설계에 끌어오지 않을 것.
+
+---
+
+## 구현 후 발견된 버그 및 수정 항목
+
+### BUG-01: planner 마일스톤 window 잔재 (fixed 채널 오분류)
+
+**증상**: fixed 채널이 예상 8개 → 실제 89개. 마일스톤 30개 보유 채널도 fixed로 오분류됨.
+
+**원인**: `display-planner.ts`의 `SELECT_MILESTONES` 쿼리에 구 half-life 회귀 알고리즘 시절의 120일 날짜 window(`polled_at >= now - 120일`)가 남아있음. 소셜블레이드 데이터 대부분이 2025년 날짜라 window 밖으로 걸려 0개로 인식.
+
+**수정 내용**:
+- `SELECT_MILESTONES` 쿼리에서 날짜 cutoff 제거
+- 대신 `ORDER BY polled_at DESC LIMIT 12` (최근 N개 순서 기반, 날짜 무관)
+- source 필터 추가: `AND source = 'socialblade_milestone'` (SB 소스만 사용)
+- `MILESTONE_HISTORY_WINDOW_DAYS` / `HALF_LIFE` env 변수 사장 처리
+
+**영향**: fixed 채널 89 → 약 8개로 정상화. 화면 정지 채널 대폭 감소.
+
+### BUG-02: executor 배칭 + 주기적 planner → 채널별 독립 setTimeout 방식으로 전면 교체
+
+**결정**: executor 삭제, 주기적 planner 삭제 → **채널별 독립 setTimeout (Plan A)** 으로 교체
+
+**새 구조**:
+- 각 채널이 자신의 이벤트 스케줄에 대한 setTimeout 핸들을 독립적으로 보유
+- 채널 간 상호 의존 없음. 한 채널 재계획이 다른 채널에 영향 없음
+
+**트리거 두 가지**:
+
+1. **사이클 만료 트리거**: 1시간 사이클 종료 시각에 setTimeout 발화 → 해당 채널만 즉시 플래너 실행 → 새 1시간 스케줄 생성 → 새 setTimeout 등록
+
+2. **새 마일스톤 트리거**: YouTube API 폴링이 새 구독자 수 감지(milestone 기록) → 해당 채널의 기존 setTimeout 전부 clearTimeout → DB에서 미적용 이벤트 DELETE → catch-up 플랜 즉시 재계획 → 새 setTimeout 등록
+
+**주기적 planner/executor 완전 제거**:
+- `worker/display-executor.ts` 삭제
+- `worker/display-planner.ts`의 setInterval 루프 삭제
+- `scheduler.ts`의 planner/executor 틱 삭제
+- planner 로직은 "채널 1개 플래닝 함수"로 축소되어 두 트리거에서 호출
+
+**worker 재시작 시 복구**:
+- DB에서 미적용(applied=0) 이벤트 전체 읽기 → 채널별로 setTimeout 재등록
+- 이미 지난 scheduled_at 이벤트는 즉시 발화(setTimeout 0ms)
+
+**BUG-04 통합**: planner 주기 5분 → 1분 이슈는 이 방식으로 근본 해소. 사이클 만료/마일스톤 변경 시점에 정확히 트리거되므로 polling 지연 없음.
+
+**setTimeout 관리**:
+- 채널별 `Map<channelId, NodeJS.Timeout[]>` 로 핸들 보관
+- clearTimeout 후 새 등록을 항상 원자적으로 처리 (이중 실행 방지)
+
+### BUG-03: 클라 폴링(/api/snapshot) 전면 폐기 → SSE 실시간 푸시로 교체
+
+**결정**: 클라이언트 30초 폴링 방식 삭제. `/api/snapshot` 엔드포인트 폐기.
+
+**새 구조**:
+- 우선순위 큐가 이벤트 발화 → DB `display_subscriber_count` 업데이트 → **SSE로 즉시 클라에 push**
+- `/api/events` SSE 스트림을 순수 데이터 채널로 승격 (기존: 배포 auto-reload 전용)
+- 클라는 SSE 스트림만 구독. 데이터 수신 즉시 lerp 애니메이션으로 표시
+- SSE 연결/재연결 시: 서버가 현재 전체 snapshot을 첫 메시지로 1회 전송 (초기값 동기화)
+
+**SSE 이벤트 포맷 (예시)**:
+```json
+{ "type": "channel_update", "channelId": "UCxxx", "subscriberCount": 5300120, "direction": "up", "changedAt": "2026-06-06T10:00:00Z" }
+```
+
+**폐기 대상**:
+- `src/app/api/snapshot/route.ts` 삭제
+- `src/lib/snapshot.ts` 삭제 (또는 SSE 초기 snapshot 전용으로 축소)
+- 클라 `useInterpolatedSnapshot.ts`의 useQuery/폴링 로직 삭제 → SSE EventSource 수신으로 교체
+- M6에서 작업한 lerp 애니메이션 로직은 유지
+
+**주의**:
+- SSE 연결이 끊기면 클라가 자동 재연결 후 초기 snapshot 수신으로 복구
+- 배포 auto-reload 신호(buildId)는 SSE에서 기존과 동일하게 유지
+- 우선순위 큐 이벤트 발화 → SSE push가 같은 트랜잭션/콜백에서 처리되어야 누락 없음
+- **프로세스 경계 문제**: worker와 web이 별개 컨테이너라 worker가 web의 SSE 클라이언트로 직접 push 불가. worker의 `internal-server.ts`(포트 3001)를 활용해 worker→web 내부 엔드포인트로 push → web이 SSE fan-out하는 방식이 가장 자연스러운 해결책.
