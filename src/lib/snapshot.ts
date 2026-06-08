@@ -35,6 +35,11 @@ const ChannelSchema = z.object({
   // Surge metrics use the configurable window, currently 24h in production.
   surgeDelta24h:   z.number().int().nullable(),
   surgeRate24h:    z.number().nullable(),
+  // 마지막 표시값 변경 방향/시각 (display_state). 사전 스케줄 executor가 매 step
+  // 갱신. M6 클라이언트 단순화 시 모션(상승/하락 테두리·화살표)을 이 서버값으로
+  // 구동한다 — 클라 랜덤 드리프트 제거 후 방향 정보 출처 (지뢰③).
+  lastChangeDirection: z.enum(['up', 'down']).nullable(),
+  lastChangedAt:       z.string().nullable(),
 });
 
 const ClientChannelSchema = z.object({
@@ -78,6 +83,8 @@ interface ChannelRow {
   video_count:      number | null;
   view_count:       number | null;
   polled_at:        string | null;
+  last_change_direction: string | null;
+  last_changed_at:  string | null;
 }
 
 interface ClientRow {
@@ -208,7 +215,9 @@ export function readSnapshot(): SnapshotResponse {
       ) AS surge_baseline_count,
       s.video_count,
       s.view_count,
-      COALESCE(d.updated_at, s.polled_at) AS polled_at
+      COALESCE(d.updated_at, s.polled_at) AS polled_at,
+      d.last_change_direction,
+      d.last_changed_at
     FROM channels c
     LEFT JOIN subscriber_snapshots s
       ON  s.channel_id = c.id
@@ -269,6 +278,11 @@ export function readSnapshot(): SnapshotResponse {
       growthRatePerHour,
       surgeDelta24h:   surgeDelta,
       surgeRate24h:    surgeRate,
+      lastChangeDirection:
+        row.last_change_direction === 'up' || row.last_change_direction === 'down'
+          ? row.last_change_direction
+          : null,
+      lastChangedAt:   row.last_changed_at ?? null,
     };
   });
 

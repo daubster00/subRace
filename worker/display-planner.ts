@@ -1,67 +1,36 @@
 import db from '@/lib/db';
 import { env } from '@/lib/env';
-import { computeExpectedDailyDelta, type MilestoneRow } from '@/lib/milestone-delta';
-import { getJstDate, getMsUntilJstMidnight } from '@/lib/time';
-import {
-  computeTargetAndDelta,
-  decideChangeCount,
-  decideTier,
-  getFallbackDailyDelta,
-  getStepBounds,
-  pickFirstIntervalMs,
-  shouldReplan,
-} from '@/lib/display-plan';
+import { type MilestoneRow } from '@/lib/milestone-delta';
+import { planCatchUp, planTargetCycle } from '@/lib/schedule-plan';
 
-// M4 display-planner — 채널별 daily plan을 display_state에 박는다.
+// 채널 1개 플래닝 함수 (BUG-02 재구성).
 //
-// 책임 범위:
-//   - 어떤 채널을 재계획할지 결정 (shouldReplan)
-//   - 오늘의 target / today_delta / change_count / next_change_at 계산
-//   - display_state UPSERT (display_subscriber_count는 신규 시드 시 api로,
-//     기존이면 유지)
-//
-// 비책임 (M5 executor):
-//   - next_change_at 도래 시 display_subscriber_count 실제 갱신
-//   - 이벤트별 step size / 증감 방향 선택
-//   - 이벤트마다 다음 next_change_at 재산정
-//
-// 순수 결정 함수는 src/lib/display-plan.ts에서 import — 단위 테스트는 거기서.
+// 구 주기적 planner(setInterval 전체 순회)는 폐기. channel-scheduler.ts가 두
+// 트리거(사이클 만료 / 새 마일스톤)에서 채널별로 이 함수를 호출한다.
+// 호출 = 무조건 재계획(언제 부를지는 트리거가 결정). 미적용 이벤트 DELETE →
+// 새 1시간 스케줄 INSERT → display_state UPSERT를 한 트랜잭션으로 처리한다
+// (이중 실행 방지 §지뢰①).
 
 interface PollStateRow {
-  channel_id: string;
   api_subscriber_count: number;
   cap_subscriber_count: number | null;
-  last_polled_at: string;
-  last_api_changed_at: string | null;
 }
 
-interface DisplayStateRow {
-  channel_id: string;
+interface DisplayRow {
   display_subscriber_count: number;
-  plan_date: string;
-  last_planned_at: string;
 }
 
-// noop 채널 — channels 테이블에 있지만 아직 poll_state 시드 안 됨.
-// pollYoutubeChannels가 처음 돌면 자동 시드됨, planner는 다음 cycle에 처리.
-// 순서가 rank — display_state.next_change_at 빈도(노출/대기) 결정에 직접 영향.
-const SELECT_RANKED_ACTIVE = `
-  SELECT ps.channel_id
-  FROM   poll_state ps
-  JOIN   channels c ON c.id = ps.channel_id
-  WHERE  c.is_active = 1
-  ORDER  BY ps.api_subscriber_count DESC
-`;
+// BUG-01 fix: 날짜 window 제거, 최근 N개 순서 기반(전 소스). DESC LIMIT → reverse.
+const MILESTONE_FETCH_LIMIT = 12;
 
 const SELECT_POLL_STATE = `
-  SELECT channel_id, api_subscriber_count, cap_subscriber_count,
-         last_polled_at, last_api_changed_at
+  SELECT api_subscriber_count, cap_subscriber_count
   FROM   poll_state
   WHERE  channel_id = ?
 `;
 
-const SELECT_DISPLAY_STATE = `
-  SELECT channel_id, display_subscriber_count, plan_date, last_planned_at
+const SELECT_DISPLAY = `
+  SELECT display_subscriber_count
   FROM   display_state
   WHERE  channel_id = ?
 `;
@@ -70,133 +39,142 @@ const SELECT_MILESTONES = `
   SELECT polled_at, subscriber_count
   FROM   subscriber_snapshots
   WHERE  channel_id = ?
-    AND  polled_at >= ?
-  ORDER  BY polled_at
+  ORDER  BY polled_at DESC
+  LIMIT  ?
 `;
 
-// display_state UPSERT — 신규는 INSERT(display = api), 기존은 UPDATE
-// (display_subscriber_count는 max(stored, api)로 — api 아래에 갇혀 있던 값은
-// 끌어올리고, 정상값은 유지). applied_change_count는 항상 0으로 리셋
-// (day rollover든 mid-day API 변경 replan이든 새 계획으로 교체).
-//
-// last_planned_at은 planner 전용 timestamp — executor의 매 step UPDATE는 절대
-// 이걸 건드리지 않는다. shouldReplan이 last_api_changed_at과 정확히 비교할 수
-// 있게 만들어진 컬럼. updated_at은 화면 forward-projection의 reference time
-// 용도라 executor가 갱신해야 함.
+const DELETE_UNAPPLIED_EVENTS = `
+  DELETE FROM display_event_schedule WHERE channel_id = ? AND applied = 0
+`;
+
+const INSERT_EVENT = `
+  INSERT INTO display_event_schedule
+    (channel_id, scheduled_at, magnitude, direction, applied, created_at)
+  VALUES (?, ?, ?, ?, 0, ?)
+`;
+
+// next_change_at은 항상 NULL(사장). plan_date/today_delta/change_count는 NOT NULL
+// 충족용 레거시 값. last_changed_at/last_change_direction은 executor(=channel-
+// scheduler) 소관이라 UPDATE에서 안 건드림.
 const UPSERT_DISPLAY_STATE = `
   INSERT INTO display_state (
     channel_id, display_subscriber_count, target_subscriber_count,
     cap_subscriber_count, today_delta, change_count, applied_change_count,
     next_change_at, last_changed_at, last_change_direction,
-    plan_date, last_planned_at, updated_at, created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?, ?, ?)
+    plan_date, last_planned_at, next_cycle_reset_at, phase,
+    updated_at, created_at
+  ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(channel_id) DO UPDATE SET
     display_subscriber_count = excluded.display_subscriber_count,
-    target_subscriber_count = excluded.target_subscriber_count,
-    cap_subscriber_count    = excluded.cap_subscriber_count,
-    today_delta             = excluded.today_delta,
-    change_count            = excluded.change_count,
-    applied_change_count    = 0,
-    next_change_at          = excluded.next_change_at,
-    plan_date               = excluded.plan_date,
-    last_planned_at         = excluded.last_planned_at,
-    updated_at              = excluded.updated_at
+    target_subscriber_count  = excluded.target_subscriber_count,
+    cap_subscriber_count     = excluded.cap_subscriber_count,
+    today_delta              = excluded.today_delta,
+    change_count             = excluded.change_count,
+    applied_change_count     = 0,
+    next_change_at           = NULL,
+    plan_date                = excluded.plan_date,
+    last_planned_at          = excluded.last_planned_at,
+    next_cycle_reset_at      = excluded.next_cycle_reset_at,
+    phase                    = excluded.phase,
+    updated_at               = excluded.updated_at
 `;
 
-export interface PlanStats {
-  considered: number;
-  planned: number;
-  skipped: number;
-  noPollState: number;
+const selectPoll       = db.prepare(SELECT_POLL_STATE);
+const selectDisplay    = db.prepare(SELECT_DISPLAY);
+const selectMilestones = db.prepare(SELECT_MILESTONES);
+const deleteEvents     = db.prepare(DELETE_UNAPPLIED_EVENTS);
+const insertEvent      = db.prepare(INSERT_EVENT);
+const upsertDisplay    = db.prepare(UPSERT_DISPLAY_STATE);
+
+export interface PlanResult {
+  phase: 'fixed' | 'catch-up' | 'normal' | 'target-bounce';
+  events: number;
+  nextResetAt: string;
 }
 
-export function planAllActiveChannels(now: Date = new Date()): PlanStats {
-  const stats: PlanStats = { considered: 0, planned: 0, skipped: 0, noPollState: 0 };
+// 트리거 종류 — caller(channel-scheduler)가 명시.
+//   'milestone': YouTube 폴링이 새 마일스톤 감지 → catch-up 플랜
+//                (현재 display값에서 새 api까지 1시간 안에 따라잡기).
+//   'cycle'    : 사이클 만료(이벤트 소진 OR next_cycle_reset_at 도달) →
+//                target 플랜 (마일스톤 추세 기반 normal/bounce/fixed).
+//   'startup'  : 워커 부팅 시 첫 plan. 안전하게 target 플랜으로 시작.
+export type PlanTrigger = 'milestone' | 'cycle' | 'startup';
 
-  const ranked = db.prepare(SELECT_RANKED_ACTIVE).all() as { channel_id: string }[];
-  const jstToday = getJstDate(now);
-  const cutoff = new Date(now.getTime() - env.MILESTONE_HISTORY_WINDOW_DAYS * 86_400_000).toISOString();
-  const halfLife = env.MILESTONE_WEIGHT_HALF_LIFE_DAYS;
-  const jitterRatio = env.CHANGE_INTERVAL_JITTER_RATIO;
-  const displayLimit = env.DISPLAY_LIMIT;
-  const bufferSize = 20; // 노출 진입 buffer (active_plan)
+// 한 채널을 재계획한다. poll_state 없으면(아직 시드 안 됨) null.
+export function planOneChannel(
+  channelId: string,
+  trigger: PlanTrigger,
+  now: Date = new Date(),
+): PlanResult | null {
+  const poll = selectPoll.get(channelId) as PollStateRow | undefined;
+  if (!poll) return null;
 
-  const selectPoll       = db.prepare(SELECT_POLL_STATE);
-  const selectDisplay    = db.prepare(SELECT_DISPLAY_STATE);
-  const selectMilestones = db.prepare(SELECT_MILESTONES);
-  const upsert           = db.prepare(UPSERT_DISPLAY_STATE);
+  const cycleMs = env.SCHEDULE_CYCLE_HOURS * 3_600_000;
+  const cfg = {
+    minMilestones: env.SCHEDULE_MIN_MILESTONES,
+    minEvents: env.SCHEDULE_MIN_EVENTS,
+    maxMagnitude: env.SCHEDULE_MAX_MAGNITUDE,
+    normalMaxMagnitude: env.SCHEDULE_NORMAL_MAX_MAGNITUDE,
+    counterRatio: env.SCHEDULE_COUNTER_RATIO,
+    cycleMs,
+    catchUpIntervalMs: env.SCHEDULE_CATCHUP_INTERVAL_MS,
+    targetRatio: env.SCHEDULE_TARGET_RATIO,
+    bounceStepRatio: env.SCHEDULE_BOUNCE_STEP_RATIO,
+    paceMaxIntervals: env.SCHEDULE_PACE_MAX_INTERVALS,
+    jitterRatio: env.SCHEDULE_EVENT_JITTER_RATIO,
+    activityNMin: env.SCHEDULE_ACTIVITY_N_MIN,
+    activityNMax: env.SCHEDULE_ACTIVITY_N_MAX,
+    activityPivot: env.SCHEDULE_ACTIVITY_PIVOT,
+  };
+
+  const api = poll.api_subscriber_count;
+  const cap = poll.cap_subscriber_count ?? api;
+  const display = (selectDisplay.get(channelId) as DisplayRow | undefined) ?? null;
+  const currentDisplay = display?.display_subscriber_count ?? null;
+
+  // milestone 트리거 → catch-up. 다른 트리거 → target.
+  // catch-up은 마일스톤 추세를 보지 않으므로 milestones 쿼리도 생략 가능하지만,
+  // target 트리거가 압도적이고 prepared statement 1회라 그대로 둔다.
+  const milestones = (selectMilestones.all(channelId, MILESTONE_FETCH_LIMIT) as MilestoneRow[]).reverse();
+
+  const plan = trigger === 'milestone'
+    ? planCatchUp(api, currentDisplay, cfg)
+    : planTargetCycle(api, currentDisplay, milestones, cfg);
 
   const nowIso = now.toISOString();
-  const remainingMs = getMsUntilJstMidnight(now);
+  // catch-up은 사이클 길이에 묶이지 않는다 — 마지막 이벤트가 끝난 직후를 사이클
+  // 만료 시각으로 잡아 도중에 'cycle' 트리거가 catch-up 이벤트를 갈아엎지 않게
+  // 한다 (2026-06-08). 나머지 phase는 종전대로 1h 롤링.
+  const lastOffsetMs =
+    plan.phase === 'catch-up' && plan.events.length > 0
+      ? plan.events[plan.events.length - 1]!.offsetMs
+      : -1;
+  const cycleDurationMs = lastOffsetMs >= 0 ? lastOffsetMs + 5_000 : cycleMs;
+  const nextResetIso = new Date(now.getTime() + cycleDurationMs).toISOString();
+  const legacyPlanDate = nowIso.slice(0, 10);
 
-  for (let i = 0; i < ranked.length; i++) {
-    const row = ranked[i];
-    if (!row) continue;
-    const channelId = row.channel_id;
-    const rank = i + 1;
-    stats.considered++;
-
-    const poll = selectPoll.get(channelId) as PollStateRow | undefined;
-    if (!poll) {
-      stats.noPollState++;
-      continue;
+  db.transaction(() => {
+    deleteEvents.run(channelId);
+    for (const e of plan.events) {
+      const scheduledAt = new Date(now.getTime() + e.offsetMs).toISOString();
+      const direction = e.magnitude > 0 ? 'up' : e.magnitude < 0 ? 'down' : 'up';
+      insertEvent.run(channelId, scheduledAt, e.magnitude, direction, nowIso);
     }
-
-    const display = (selectDisplay.get(channelId) as DisplayStateRow | undefined) ?? null;
-    if (!shouldReplan({ display, poll, jstToday })) {
-      stats.skipped++;
-      continue;
-    }
-
-    const api = poll.api_subscriber_count;
-    // cap_subscriber_count는 M2에서 함께 박혔지만 NULL 보호.
-    const cap = poll.cap_subscriber_count ?? api;
-    // display는 api 아래로 내려가지 않는다. 회귀 수정 이전 데이터(planner가
-    // skip되어 cap이 옛 값에 갇혀 display가 api보다 뒤처진 행)는 replan 시
-    // api까지 끌어올린다 — 표시값을 api 아래로 두는 건 사용자가 보는 절대
-    // 거짓이라 한 번에 따라잡는 게 맞다.
-    const storedDisplay = display?.display_subscriber_count ?? api;
-    const currentDisplay = Math.max(storedDisplay, api);
-
-    const milestones = selectMilestones.all(channelId, cutoff) as MilestoneRow[];
-    const delta = computeExpectedDailyDelta(milestones, { now, halfLifeDays: halfLife });
-    const expectedDailyDelta = delta?.expectedDailyDelta ?? getFallbackDailyDelta(api);
-
-    const { target, todayDelta } = computeTargetAndDelta({
-      display: currentDisplay,
-      api,
-      cap,
-      expectedDailyDelta,
-    });
-
-    const tier = decideTier(rank, displayLimit, bufferSize);
-    const stepBounds = getStepBounds(api);
-    const changeCount = decideChangeCount({ todayDelta, stepBounds, tier });
-
-    const firstIntervalMs = pickFirstIntervalMs({
-      remainingMs,
-      remainingChanges: changeCount,
-      jitterRatio,
-    });
-    const nextChangeAt = new Date(now.getTime() + firstIntervalMs).toISOString();
-
-    // created_at은 INSERT 경로에서만 박힘 (ON CONFLICT DO UPDATE는 무시).
-    // 기존 행은 자신의 created_at 유지.
-    upsert.run(
+    upsertDisplay.run(
       channelId,
-      currentDisplay,
-      target,
+      plan.display,
+      plan.target,
       cap,
-      todayDelta,
-      changeCount,
-      nextChangeAt,
-      jstToday,
-      nowIso, // last_planned_at
-      nowIso, // updated_at
-      nowIso, // created_at (INSERT만 적용)
+      plan.netDelta,
+      plan.events.length,
+      legacyPlanDate,
+      nowIso,         // last_planned_at
+      nextResetIso,   // next_cycle_reset_at
+      plan.phase,
+      nowIso,         // updated_at
+      nowIso,         // created_at (INSERT만)
     );
-    stats.planned++;
-  }
+  })();
 
-  return stats;
+  return { phase: plan.phase, events: plan.events.length, nextResetAt: nextResetIso };
 }

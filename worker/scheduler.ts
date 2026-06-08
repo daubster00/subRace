@@ -6,8 +6,7 @@ import { pollYoutubeChannels } from './youtube-channels';
 import { startLivePoller } from './youtube-live';
 import { pollYoutubeLikes } from './youtube-likes';
 import { startRetentionScheduler } from './retention';
-import { planAllActiveChannels } from './display-planner';
-import { executePendingChanges } from './display-executor';
+import { startChannelSchedulers } from './channel-scheduler';
 
 function getLastSuccessAt(table: 'yutura_pulls' | 'youtube_polls'): Date | null {
   const col = table === 'yutura_pulls' ? 'pulled_at' : 'polled_at';
@@ -49,14 +48,8 @@ function hasChannelsWithoutSnapshots(): boolean {
 // then resume the cadence. Losing this on restart is harmless — the worst case
 // is one extra poll, which costs 1 unit when CLIENT_VIDEO_ID is set.
 let lastLikesPollAt: Date | null = null;
-// 같은 이유로 planner cadence도 in-memory. display_state 자체에 plan_date가
-// 박혀 있어 재시작 직후 첫 tick이 doubles로 돌아도 shouldReplan이 대부분
-// false라 비용 거의 없음.
-let lastPlannerAt: Date | null = null;
-// executor는 60s 고정 cadence — pickFirstIntervalMs의 MIN_INTERVAL_MS와 같은
-// 단위. 더 자주 돌아봐야 next_change_at 정확도가 안 올라가고, 더 늦으면
-// 변경이 누적돼 한 tick에 몰린다.
-let lastExecutorAt: Date | null = null;
+// display planner/executor의 주기적 tick은 BUG-02에서 폐기. 이제 채널별 독립
+// 타이머(channel-scheduler.ts)가 사이클 만료/새 마일스톤 시점에 정확히 트리거.
 // Set by startScheduler so triggerLikesPoll can route reload-driven refreshes
 // through the same single-flight as the cadence tick.
 let runLikesFn: (() => Promise<void>) | null = null;
@@ -67,8 +60,6 @@ export function startScheduler(): void {
   const yuturaIntervalMs = (): number => env.YUTURA_INTERVAL_HOURS * 60 * 60 * 1000;
   const channelsIntervalMs = (): number => env.YOUTUBE_POLL_INTERVAL_HOURS * 60 * 60 * 1000;
   const likesIntervalMs = (): number => env.YOUTUBE_LIKES_POLL_INTERVAL_HOURS * 60 * 60 * 1000;
-  const plannerIntervalMs = (): number => env.DISPLAY_PLANNER_INTERVAL_MINUTES * 60 * 1000;
-  const executorIntervalMs = 60_000;
 
   // isDue() only inspects the last *finished* poll, so without single-flight
   // locks a long-running poll (yutura resolve ~225s) would overlap with the
@@ -86,40 +77,6 @@ export function startScheduler(): void {
   });
   runLikesFn = runLikes;
 
-  // planner는 동기 DB 작업이라 빠르지만 single-flight로 setInterval 중첩만 차단.
-  const runPlanner = createSingleFlight(async () => {
-    try {
-      const stats = planAllActiveChannels();
-      if (stats.planned > 0 || stats.noPollState > 0) {
-        console.log(
-          `[worker] display_planner_tick considered=${stats.considered} planned=${stats.planned} skipped=${stats.skipped} no_poll_state=${stats.noPollState}`,
-        );
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.log(`[worker] display_planner_failed reason=${message}`);
-    } finally {
-      lastPlannerAt = new Date();
-    }
-  });
-
-  // executor도 동기 DB 작업. due 0이면 로그 silent — 대부분 tick은 그렇다.
-  const runExecutor = createSingleFlight(async () => {
-    try {
-      const stats = executePendingChanges();
-      if (stats.executed > 0) {
-        console.log(
-          `[worker] display_executor_tick due=${stats.due} executed=${stats.executed} noop=${stats.noopDelta} finalized=${stats.finalized}`,
-        );
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.log(`[worker] display_executor_failed reason=${message}`);
-    } finally {
-      lastExecutorAt = new Date();
-    }
-  });
-
   if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void runYutura();
 
   const channelsDue = isDue(getLastYoutubePacedAt(), channelsIntervalMs()) || hasChannelsWithoutSnapshots();
@@ -128,12 +85,6 @@ export function startScheduler(): void {
 
   // No persisted last-poll for likes — fire once on startup, then cadence.
   void runLikes();
-
-  // planner는 startup에 한 번 — 워커가 죽어 있던 사이 누적된 plan_date 변경 /
-  // API 변경을 따라잡는다. executor도 마찬가지: 다운타임 동안 next_change_at이
-  // 지나간 채널은 첫 tick에서 모두 한 번씩 처리(이후 정상 cadence로 분산).
-  void runPlanner();
-  void runExecutor();
 
   setInterval(() => {
     if (isDue(getLastSuccessAt('yutura_pulls'), yuturaIntervalMs())) void runYutura();
@@ -147,13 +98,9 @@ export function startScheduler(): void {
     if (isDue(lastLikesPollAt, likesIntervalMs())) void runLikes();
   }, 60_000);
 
-  setInterval(() => {
-    if (isDue(lastPlannerAt, plannerIntervalMs())) void runPlanner();
-  }, 60_000);
-
-  setInterval(() => {
-    if (isDue(lastExecutorAt, executorIntervalMs)) void runExecutor();
-  }, 60_000);
+  // 채널별 독립 타이머 기동 (BUG-02). 기존 스케줄은 DB에서 복구, 없으면 새로 계획.
+  // 이후 재계획은 타이머의 사이클 만료 / youtube-channels의 onNewMilestone이 구동.
+  startChannelSchedulers();
 
   startLivePoller();
   startRetentionScheduler();

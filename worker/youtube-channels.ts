@@ -3,6 +3,7 @@ import db from '@/lib/db';
 import { env } from '@/lib/env';
 import { getNextMilestone } from '@/lib/next-milestone';
 import { computeCap } from '@/lib/cap';
+import { onNewMilestone } from './channel-scheduler';
 
 const YtChannelItemSchema = z.object({
   id: z.string(),
@@ -130,6 +131,8 @@ export async function pollYoutubeChannels(): Promise<void> {
       let seededCount = 0;
       let changedCount = 0;
       let unchangedCount = 0;
+      // 새 마일스톤이 기록된 채널(시드 또는 변경) — 커밋 후 즉시 재계획 트리거.
+      const milestoneChannelIds: string[] = [];
 
       const commitSuccess = db.transaction((snapshotItems: YtChannelItem[]) => {
         for (const item of snapshotItems) {
@@ -148,6 +151,7 @@ export async function pollYoutubeChannels(): Promise<void> {
               polledAt, polledAt, polledAt, polledAt,
             );
             seededCount++;
+            milestoneChannelIds.push(item.id);
           } else if (existing.api_subscriber_count === apiCount) {
             updatePollStateUnchanged.run(polledAt, polledAt, item.id);
             unchangedCount++;
@@ -161,6 +165,7 @@ export async function pollYoutubeChannels(): Promise<void> {
               item.id,
             );
             changedCount++;
+            milestoneChannelIds.push(item.id);
           }
 
           const thumbnailUrl =
@@ -175,6 +180,10 @@ export async function pollYoutubeChannels(): Promise<void> {
           .run(startedAt, 'success', channelRows.length);
       });
       commitSuccess(items);
+
+      // 새 마일스톤 채널 즉시 재계획 (catch-up). 커밋 이후라 planOneChannel이
+      // 읽는 poll_state/마일스톤이 최신 상태.
+      for (const id of milestoneChannelIds) onNewMilestone(id);
 
       const n = channelRows.length;
       const durationMs = Date.now() - new Date(startedAt).getTime();

@@ -15,6 +15,7 @@ interface RankCardProps {
 
 const COUNT_GLOW_DURATION_MS = 5_200;
 const COUNT_TRACE_DURATION_MS = 2_600;
+const COUNT_CORNER_DURATION_MS = 900;
 
 const cornerPositions = [
   { position: { top: -1, left: -1 }, rotate: 0, delay: '0ms' },
@@ -26,6 +27,11 @@ const cornerPositions = [
 export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProps) {
   const prevRankRef = useRef(rank);
   const prevCountRef = useRef(channel.subscriberCount);
+  // 20초마다 1~50/51~100 페이지가 교대로 mount되는데, mount 직후 첫 effect는
+  // prevCountRef.current === channel.subscriberCount라 early return → 모션이
+  // 그려지지 않는다. 첫 진입에서 motionActiveUntil이 활성이면 RollingCounter의
+  // 증감 표시(deltaState)와 같이 모션을 그려야 두 표시가 동기화된다.
+  const initializedRef = useRef(false);
   const motionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isSwapping, setIsSwapping] = useState(false);
   const [isCounting, setIsCounting] = useState(false);
@@ -41,18 +47,17 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
     }
   }, [rank]);
 
-  // 테두리 모션은 실제 subscriberCount가 바뀌는 시점에 시작한다.
-  // motionActiveUntil 기반으로 트리거하면 1~50 / 51~100 페이지가 스왑되며
-  // 카드가 모션 중간에 mount될 때, 그 모션의 숫자 스텝은 off-screen에서 이미
-  // 끝나 있어서 "테두리는 그려지는데 숫자/증감 표시는 안 나오는" 채널이 생긴다.
-  // 카운트 변화에 묶으면 border ⇔ delta 동기가 자연스럽게 유지된다.
+  // 테두리 모션 트리거. 카운트 변화 OR 첫 mount(initializedRef=false) — 둘 다
+  // motionActiveUntil 활성 + direction != 0이면 모션. 페이지 스왑으로 mount된
+  // 카드도 활성 모션이 있으면 RollingCounter의 증감과 동기화되어 표시된다.
   useEffect(() => {
-    if (prevCountRef.current === channel.subscriberCount) return;
+    const isFirst = !initializedRef.current;
+    const changed = prevCountRef.current !== channel.subscriberCount;
+    if (!isFirst && !changed) return;
+    initializedRef.current = true;
     prevCountRef.current = channel.subscriberCount;
 
     const now = Date.now();
-    // 활성 모션과 무관한 카운트 변화(스냅샷 도착 직후 correction lerp 등)는
-    // 테두리를 그리지 않는다.
     if (channel.motionActiveUntil <= now || channel.motionDirection === 0) return;
 
     if (motionTimerRef.current !== null) {
@@ -211,7 +216,7 @@ export function RankCard({ channel, rank, motionIndex, isAlerted }: RankCardProp
                   filter: `drop-shadow(0 0 4px ${countTraceColor})`,
                   strokeDasharray: 1,
                   strokeDashoffset: 1,
-                  animation: `countCornerDraw 900ms ease ${corner.delay} both`,
+                  animation: `countCornerDraw ${COUNT_CORNER_DURATION_MS}ms ease ${corner.delay} both`,
                 }}
               />
             </svg>
