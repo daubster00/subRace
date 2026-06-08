@@ -1,6 +1,6 @@
 import db from '@/lib/db';
 import { env } from '@/lib/env';
-import { planOneChannel } from './display-planner';
+import { planOneChannel, type PlanTrigger } from './display-planner';
 
 // BUG-03: 이벤트 적용 후 web의 SSE 허브로 push (worker→web). web은 운영자
 // Basic Auth 뒤에 있어 worker가 자격증명으로 호출한다. settings 라우트의
@@ -153,7 +153,7 @@ function fire(channelId: string): void {
     const cycleDone = remaining === 0 || (reset != null && now.getTime() >= new Date(reset).getTime());
 
     if (cycleDone) {
-      replanAndArm(channelId);
+      replanAndArm(channelId, 'cycle');
     } else {
       armTimer(channelId);
     }
@@ -167,10 +167,14 @@ function fire(channelId: string): void {
 }
 
 // 재계획(미적용 이벤트 DELETE + 새 스케줄 생성) 후 재무장.
-function replanAndArm(channelId: string): void {
+// trigger:
+//   'milestone' — youtube-channels가 새 마일스톤 감지, catch-up 플랜.
+//   'cycle'     — 사이클 만료, target 플랜.
+//   'startup'   — 워커 첫 부팅 시 신규 채널, target 플랜.
+function replanAndArm(channelId: string, trigger: PlanTrigger): void {
   clearChannelTimer(channelId);
   try {
-    planOneChannel(channelId);
+    planOneChannel(channelId, trigger);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(`[worker] channel_replan_failed channel=${channelId} reason=${message}`);
@@ -179,15 +183,17 @@ function replanAndArm(channelId: string): void {
 }
 
 // 새 마일스톤(YouTube API 변경) 트리거 — youtube-channels.ts가 호출.
-// planOneChannel이 미적용 이벤트를 비우고 catch-up 플랜을 새로 깐다.
+// planOneChannel이 미적용 이벤트(target 플랜)를 전면 삭제 → catch-up 플랜으로
+// 교체. 사용자 의도: catch-up이 발동하면 target 플랜이 세운 이벤트를 모두
+// 비우고 1시간 catch-up 스케줄로 갈아끼움.
 export function onNewMilestone(channelId: string): void {
-  replanAndArm(channelId);
+  replanAndArm(channelId, 'milestone');
 }
 
 // 워커 시작 시: 기존 스케줄이 있으면(재시작 복구) 재무장, 없으면 새로 계획.
 //   - display_state.next_cycle_reset_at 있음 → DB의 미적용 이벤트/리셋 시각으로
 //     타이머 복구 (지난 scheduled_at은 delay 0으로 즉시 발화).
-//   - 없음(첫 진입) → planOneChannel로 새 스케줄 생성.
+//   - 없음(첫 진입) → planOneChannel('startup')로 target 플랜 생성.
 export function startChannelSchedulers(): void {
   const channels = selActive.all() as { channel_id: string }[];
   let resumed = 0;
@@ -198,7 +204,7 @@ export function startChannelSchedulers(): void {
       armTimer(channelId);
       resumed++;
     } else {
-      replanAndArm(channelId);
+      replanAndArm(channelId, 'startup');
       planned++;
     }
   }

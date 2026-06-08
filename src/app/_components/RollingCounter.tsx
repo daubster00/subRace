@@ -12,7 +12,6 @@ interface RollingCounterProps {
 const MIN_DIGIT_DURATION = 2_100;
 const STEP_DURATION = 260;
 const MAX_DIGIT_DURATION = 4_200;
-const DELTA_HOLD_MS = 4_500;
 const DELAY_STEP = 48;
 const PREVIOUS_VALUE_COMMIT_MS = MAX_DIGIT_DURATION + 800;
 
@@ -145,16 +144,16 @@ export function RollingCounter({ value, prevPolledCount, motionActiveUntil = 0 }
 
     deltaSourceRef.current = value;
     const now = Date.now();
-    // 모션 활성 구간이 주어지면 그 종료에 맞춰 증감 표시를 숨김
-    // (테두리 모션과 동일 시점에 사라지도록)
-    const visibleUntil = motionActiveUntil > now
-      ? motionActiveUntil
-      : now + DELTA_HOLD_MS;
+    // mount 직후 stale prev 때문에 value !== source가 잡히지만 motionActiveUntil
+    // 이 이미 지난 경우 — RankCard 테두리 모션은 그려지지 않는다. 증감만 4.5초
+    // 띄우면 "테두리 없이 화살표만 떠 있는" 부자연스러운 표시가 됨. 두 표시는
+    // 항상 동기화되어야 하므로 motionActiveUntil 활성일 때만 증감을 띄운다.
+    if (motionActiveUntil <= now) return;
 
     setDeltaState({
       direction: value > source ? 1 : -1,
       delta: Math.abs(value - source),
-      visibleUntil,
+      visibleUntil: motionActiveUntil,
     });
   }, [value, motionActiveUntil]);
 

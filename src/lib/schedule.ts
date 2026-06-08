@@ -3,7 +3,7 @@
 // 한 채널의 1시간 사이클에 대해 (시각 offset, 부호 있는 magnitude) 이벤트 배열을
 // 만든다. 핵심 불변식:
 //   1. Σ magnitude === netDelta            (정확히 일치 — 마지막 보정 불필요)
-//   2. |각 magnitude| <= maxMagnitude       (절대 상한 ±20, 항목 4 해소)
+//   2. |각 magnitude| <= maxMagnitude       (호출 측이 phase별로 주입: normal 10, catch-up 20)
 //   3. 이벤트 수 >= minEvents               (시간당 최소 6 — 화면 안 멈춤)
 //   4. 추세/반대 방향 개수 고정(확률 X)      (80/20 → 우연한 몰림 구조적 불가, 항목 6)
 //   5. 시각은 균등 분배 + jitter             (메트로놈 방지 + 휴식 구간)
@@ -17,19 +17,60 @@ function defaultRng(): number {
   return Math.random();
 }
 
-// total(>=0)을 n개 정수로 최대한 고르게 분할. 각 <= maxEach. 합 === total.
-//   base = floor(total/n), 앞쪽 rem개가 base+1.
-// 호출 측이 n >= ceil(total/maxEach)를 보장하면 base+1 <= maxEach.
-function distributeInt(total: number, n: number, maxEach: number): number[] {
+// total을 n개 정수로 분배. 각 ∈ [1, maxEach]. 합 정확히 total.
+//   분포 방식: 평균 avg = total/n 중심으로 ±variance 흔든 뒤 클램프, 잔차는
+//   무작위 슬롯에 ±1로 흡수. distributeInt(균등)보다 자연스러운 다양성을
+//   주려는 목적 — magnitude가 maxEach에 몰리던 문제 해소(2026-06-08).
+//
+// 사전조건: n * 1 <= total <= n * maxEach. 호출 측이 nTrend를 충분히 늘려
+// avg가 maxEach에 못 미치도록 잡아야 분산 여지가 생긴다 (avg=maxEach면 모두
+// maxEach로 클램프 — 분산 0).
+function distributeRandom(
+  total: number,
+  n: number,
+  maxEach: number,
+  rng: () => number,
+): number[] {
   if (n <= 0) return [];
-  const base = Math.floor(total / n);
-  let rem = total - base * n;
+  const minEach = 1;
+  // 안전망: 입력이 사전조건을 벗어나면 균등 폴백.
+  if (total <= n * minEach) {
+    const out = Array<number>(n).fill(minEach);
+    let rem = total - n * minEach;
+    while (rem > 0) { out[Math.floor(rng() * n)]!++; rem--; }
+    while (rem < 0) {
+      const idx = Math.floor(rng() * n);
+      if (out[idx]! > 0) { out[idx]!--; rem++; }
+    }
+    return out;
+  }
+  if (total >= n * maxEach) return Array<number>(n).fill(maxEach);
+
+  const avg = total / n;
+  // 분산 폭: avg와 양쪽 클램프 한계 중 좁은 쪽 × 0.8. avg가 양 끝에 가까울
+  // 수록 변동 폭이 자연히 좁아져 클램프로 인한 평탄화를 방지.
+  const variance = Math.min(avg - minEach, maxEach - avg) * 0.8;
   const out: number[] = [];
   for (let i = 0; i < n; i++) {
-    let v = base + (rem > 0 ? 1 : 0);
-    if (rem > 0) rem--;
-    if (v > maxEach) v = maxEach; // 방어 (정상 입력에선 도달 안 함)
-    out.push(v);
+    const v = Math.round(avg + (rng() - 0.5) * 2 * variance);
+    out.push(Math.max(minEach, Math.min(maxEach, v)));
+  }
+
+  // 합 보정: 차이만큼 자격 슬롯(maxEach 미달/minEach 초과)에 ±1.
+  let diff = total - out.reduce((a, b) => a + b, 0);
+  while (diff > 0) {
+    const eligible: number[] = [];
+    for (let i = 0; i < n; i++) if (out[i]! < maxEach) eligible.push(i);
+    if (eligible.length === 0) break;
+    out[eligible[Math.floor(rng() * eligible.length)]!]!++;
+    diff--;
+  }
+  while (diff < 0) {
+    const eligible: number[] = [];
+    for (let i = 0; i < n; i++) if (out[i]! > minEach) eligible.push(i);
+    if (eligible.length === 0) break;
+    out[eligible[Math.floor(rng() * eligible.length)]!]!--;
+    diff++;
   }
   return out;
 }
@@ -76,6 +117,11 @@ export interface BuildCycleOpts {
 }
 
 // 일반 사이클 (catch-up / normal). Σ magnitude === netDelta.
+//
+// 다양성 확보(2026-06-08): trend slot 수를 ceil(requiredTrend / (maxMag×0.7))
+// 까지 확장해 평균 magnitude가 maxMag 한참 아래로 떨어지게 한다. 그 위에
+// distributeRandom으로 평균±분산 분배 → 한 사이클 안에 magnitude가 1~maxMag
+// 범위에 자연 분포한다(과거: 거의 maxMag로 평탄화).
 export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
   const { cycleMs, minEvents, maxMagnitude, counterRatio, jitterRatio } = opts;
@@ -88,24 +134,30 @@ export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   // 반대 방향 이벤트 수 (개수 고정 — 확률 아님).
   const nCounter = counterRatio > 0 ? Math.round(baseN * counterRatio) : 0;
 
-  // 반대 이벤트 1개당 크기 — 작게. 평균 추세 크기의 절반 수준, 최소 1.
-  const counterEach =
+  // 반대 이벤트 1개당 평균 크기 — 작게. 평균 추세 크기의 절반 수준, 최소 1.
+  const counterEachAvg =
     nCounter > 0
       ? Math.min(maxMagnitude, Math.max(1, Math.round(absNet / baseN / 2)))
       : 0;
-  const totalCounter = nCounter * counterEach;
+  const totalCounter = nCounter * counterEachAvg;
 
   // 추세 이벤트가 채워야 할 총량 = 순변화 + 반대분 상쇄.
   const requiredTrend = absNet + totalCounter;
+  // 다양화 항: 평균 magnitude를 maxMag * 0.7로 캡 → slot 수가 자동 확장.
+  const nTrendDiverse = Math.ceil(requiredTrend / (maxMagnitude * 0.7)) || 1;
   const nTrend = Math.max(
     baseN - nCounter,
     Math.ceil(requiredTrend / maxMagnitude) || 1,
+    nTrendDiverse,
     1,
   );
 
-  const trendMags = shuffle(distributeInt(requiredTrend, nTrend, maxMagnitude), rng)
+  const trendMags = shuffle(distributeRandom(requiredTrend, nTrend, maxMagnitude, rng), rng)
     .map((m) => trendDir * m);
-  const counterMags: number[] = Array.from({ length: nCounter }, () => -trendDir * counterEach);
+  const counterMags: number[] =
+    nCounter > 0
+      ? distributeRandom(totalCounter, nCounter, maxMagnitude, rng).map((m) => -trendDir * m)
+      : [];
 
   // 반대 이벤트를 슬롯에 고르게 끼워넣기 (한 군데 몰리지 않게).
   const merged = interleave(trendMags, counterMags);
@@ -136,6 +188,102 @@ function interleave(trend: number[], counter: number[]): number[] {
     }
   }
   return out;
+}
+
+export interface BuildCatchUpOpts {
+  netDelta: number;       // 따라잡을 순변화 (부호 있음)
+  intervalMs: number;     // 이벤트 사이 고정 간격 (기본 3000ms)
+  maxMagnitude: number;   // 이벤트당 절대 상한 (기본 40)
+  rng?: () => number;
+}
+
+// catch-up 자연스러움 파라미터 (2026-06-08 customer feedback). 향후 env 승격 여지.
+//   REST_RATIO   : 휴식 슬롯 비율 상한 — 총 이벤트 수의 10% 이내.
+//   REST_MIN/MAX : 휴식 한 번당 0.5~2.0초.
+//   COUNTER_RATIO: 감소 슬롯 비율 상한 — 총 이벤트 수의 5% 이내.
+//   COUNTER_MAG  : 감소 슬롯 한 번당 1 (subscriber). "내려가는 것처럼만 보이게".
+const CATCHUP_REST_RATIO    = 0.10;
+const CATCHUP_REST_MIN_MS   = 500;
+const CATCHUP_REST_MAX_MS   = 2_000;
+const CATCHUP_COUNTER_RATIO = 0.05;
+const CATCHUP_COUNTER_MAG   = 1;
+
+// N개 슬롯 중 K개 균등 + jitter 픽 (인덱스 0 제외 — 첫 이벤트 앞 휴식 무의미).
+function pickEvenSlots(n: number, k: number, rng: () => number): Set<number> {
+  const out = new Set<number>();
+  if (k <= 0 || n <= 1) return out;
+  const span = n - 1;
+  const step = span / k;
+  for (let i = 0; i < k; i++) {
+    const center = 1 + step * i + step / 2;
+    const jitter = (rng() - 0.5) * step;
+    const idx = Math.round(center + jitter);
+    out.add(Math.max(1, Math.min(n - 1, idx)));
+  }
+  return out;
+}
+
+// catch-up 전용 빌더 (2026-06-08, 사용자 피드백).
+// 사이클(=1시간)에 묶이지 않는다. 기본 intervalMs(=3초) 고정 간격에 휴식/감소
+// 슬롯을 섞어 큰 갭 채널이 1초당 1회씩 쉬지 않고 올라가던 문제를 막는다.
+//
+// 구조:
+//   - 추세 슬롯 T = ceil((absNet + C) / maxMag), 합 = absNet + C
+//   - 감소 슬롯 C ≤ T × 5/95 (전체의 5% 이내), 각 ±1
+//   - 휴식 슬롯 R ≤ N × 10% (N=T+C), 각 슬롯 직전에 0.5~2초 추가 지연
+//   - Σ magnitude === netDelta (감소분 추세가 흡수)
+//   - |각 magnitude| ≤ maxMagnitude
+//
+// 갭이 작은 채널(absNet ≤ maxMag×~19)은 C=0, R=0이라 순수 i×interval 페이스.
+export function buildCatchUpEvents(opts: BuildCatchUpOpts): ScheduledEvent[] {
+  const rng = opts.rng ?? defaultRng;
+  const absNet = Math.abs(opts.netDelta);
+  if (absNet === 0) return [];
+  const trendDir = opts.netDelta > 0 ? 1 : -1;
+  const maxMag = opts.maxMagnitude;
+
+  // T, C 동시 결정 — C/(T+C) ≤ counterRatio. 평형: C = floor(T × r/(1-r)),
+  // T = max(추세_충족_최소, 다양화). 단조 증가 → 3회면 안정.
+  //
+  // 다양화 항(2026-06-08 customer feedback): T_diverse = ceil(absNet / (maxMag × 0.7))
+  // 으로 슬롯을 부풀려 distributeRandom의 variance 폭이 충분히 열린다. 그렇지
+  // 않으면 T = ceil(absNet/maxMag)에서 avg = maxMag − ε이 되어 모든 슬롯이
+  // maxMag로 클램프(=catch-up이 +40만 연속 출력하는 문제).
+  const cFactor = CATCHUP_COUNTER_RATIO / (1 - CATCHUP_COUNTER_RATIO);
+  let T = Math.max(1, Math.ceil(absNet / (maxMag * 0.7)));
+  let C = 0;
+  for (let i = 0; i < 3; i++) {
+    C = Math.floor(T * cFactor);
+    const trendTotal = absNet + C * CATCHUP_COUNTER_MAG;
+    T = Math.max(
+      Math.ceil(trendTotal / maxMag),         // 합 충족 최소
+      Math.ceil(trendTotal / (maxMag * 0.7)), // 다양화
+    );
+  }
+
+  // 추세 합 = absNet + C×counterMag (감소분 흡수). 1~maxMag로 무작위 분배.
+  const trendTotal = absNet + C * CATCHUP_COUNTER_MAG;
+  const trendMags = shuffle(distributeRandom(trendTotal, T, maxMag, rng), rng)
+    .map((m) => trendDir * m);
+  const counterMags = Array<number>(C).fill(-trendDir * CATCHUP_COUNTER_MAG);
+  const merged = interleave(trendMags, counterMags);
+  const N = merged.length;
+
+  // 휴식 슬롯 — 무작위 균등 분포 + jitter, 각 0.5~2초 추가 지연.
+  const R = Math.floor(N * CATCHUP_REST_RATIO);
+  const restSlots = pickEvenSlots(N, R, rng);
+  const restSpan = CATCHUP_REST_MAX_MS - CATCHUP_REST_MIN_MS + 1;
+
+  const events: ScheduledEvent[] = [];
+  let cursor = 0;
+  for (let i = 0; i < N; i++) {
+    if (restSlots.has(i)) {
+      cursor += CATCHUP_REST_MIN_MS + Math.floor(rng() * restSpan);
+    }
+    events.push({ offsetMs: cursor, magnitude: merged[i]! });
+    cursor += opts.intervalMs;
+  }
+  return events;
 }
 
 export interface BuildBounceOpts {

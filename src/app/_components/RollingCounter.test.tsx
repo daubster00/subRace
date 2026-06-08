@@ -93,8 +93,10 @@ describe('RollingCounter', () => {
 
   it('증가 방향 시 방향 표시(상향 삼각형)가 나타난다', () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-08T00:00:00Z'));
+    const future = Date.now() + 5_000;
     const { container } = render(
-      <RollingCounter value={10100} prevPolledCount={10000} />
+      <RollingCounter value={10100} prevPolledCount={10000} motionActiveUntil={future} />
     );
     act(() => {
       vi.advanceTimersByTime(1);
@@ -106,8 +108,10 @@ describe('RollingCounter', () => {
 
   it('감소 방향 시 방향 표시(하향 삼각형)가 나타난다', () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-08T00:00:00Z'));
+    const future = Date.now() + 5_000;
     const { container } = render(
-      <RollingCounter value={9900} prevPolledCount={10000} />
+      <RollingCounter value={9900} prevPolledCount={10000} motionActiveUntil={future} />
     );
     act(() => {
       vi.advanceTimersByTime(1);
@@ -119,6 +123,22 @@ describe('RollingCounter', () => {
 
   it('prevPolledCount 없으면 방향 표시가 나타나지 않는다', () => {
     const { container } = render(<RollingCounter value={10000} />);
+    expect(container.querySelector('polygon')).toBeNull();
+  });
+
+  // 2026-06-08: motionActiveUntil이 이미 지난 mount-time stale prev에는 증감
+  // 표시도 띄우지 않는다 (테두리 모션과 동기화). 페이지 스왑 직후 "테두리 없이
+  // 화살표만 떠 있는" 부자연스러운 잔존을 막기 위함.
+  it('motionActiveUntil이 지난 상태로 mount되면 방향 표시 안 나타남', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-08T00:00:00Z'));
+    const past = Date.now() - 1_000;
+    const { container } = render(
+      <RollingCounter value={10100} prevPolledCount={10000} motionActiveUntil={past} />
+    );
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
     expect(container.querySelector('polygon')).toBeNull();
   });
 
