@@ -13,7 +13,6 @@ import { planCatchUp, planTargetCycle } from '@/lib/schedule-plan';
 
 interface PollStateRow {
   api_subscriber_count: number;
-  cap_subscriber_count: number | null;
 }
 
 interface DisplayRow {
@@ -24,7 +23,7 @@ interface DisplayRow {
 const MILESTONE_FETCH_LIMIT = 12;
 
 const SELECT_POLL_STATE = `
-  SELECT api_subscriber_count, cap_subscriber_count
+  SELECT api_subscriber_count
   FROM   poll_state
   WHERE  channel_id = ?
 `;
@@ -59,15 +58,14 @@ const INSERT_EVENT = `
 const UPSERT_DISPLAY_STATE = `
   INSERT INTO display_state (
     channel_id, display_subscriber_count, target_subscriber_count,
-    cap_subscriber_count, today_delta, change_count, applied_change_count,
+    today_delta, change_count, applied_change_count,
     next_change_at, last_changed_at, last_change_direction,
     plan_date, last_planned_at, next_cycle_reset_at, phase,
     updated_at, created_at
-  ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(channel_id) DO UPDATE SET
     display_subscriber_count = excluded.display_subscriber_count,
     target_subscriber_count  = excluded.target_subscriber_count,
-    cap_subscriber_count     = excluded.cap_subscriber_count,
     today_delta              = excluded.today_delta,
     change_count             = excluded.change_count,
     applied_change_count     = 0,
@@ -128,7 +126,6 @@ export function planOneChannel(
   };
 
   const api = poll.api_subscriber_count;
-  const cap = poll.cap_subscriber_count ?? api;
   const display = (selectDisplay.get(channelId) as DisplayRow | undefined) ?? null;
   const currentDisplay = display?.display_subscriber_count ?? null;
 
@@ -164,7 +161,6 @@ export function planOneChannel(
       channelId,
       plan.display,
       plan.target,
-      cap,
       plan.netDelta,
       plan.events.length,
       legacyPlanDate,

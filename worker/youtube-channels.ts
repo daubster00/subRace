@@ -2,7 +2,6 @@ import { z } from 'zod';
 import db from '@/lib/db';
 import { env } from '@/lib/env';
 import { getNextMilestone } from '@/lib/next-milestone';
-import { computeCap } from '@/lib/cap';
 import { onNewMilestone } from './channel-scheduler';
 
 const YtChannelItemSchema = z.object({
@@ -88,8 +87,8 @@ export async function pollYoutubeChannels(): Promise<void> {
       //   subscriber_snapshots는 손대지 않음 → unique index가 막아주기 전에
       //   상위 레벨에서 차단.
       // - API 값 변동: 마일스톤 INSERT (source='youtube_api_change') +
-      //   poll_state UPDATE (previous=기존 api, api=새 값, next_milestone/cap
-      //   재계산, last_api_changed_at=polledAt).
+      //   poll_state UPDATE (previous=기존 api, api=새 값, next_milestone 재계산,
+      //   last_api_changed_at=polledAt).
       const selectPollState = db.prepare(`
         SELECT api_subscriber_count FROM poll_state WHERE channel_id = ?
       `);
@@ -101,9 +100,9 @@ export async function pollYoutubeChannels(): Promise<void> {
       const insertPollState = db.prepare(`
         INSERT INTO poll_state (
           channel_id, api_subscriber_count, previous_api_subscriber_count,
-          next_milestone, cap_subscriber_count,
+          next_milestone,
           last_polled_at, last_api_changed_at, updated_at, created_at
-        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
       `);
       // SQLite는 UPDATE의 RHS를 원본 컬럼값으로 평가하므로
       // previous = api_subscriber_count, api = ? 가 안전하다.
@@ -112,7 +111,6 @@ export async function pollYoutubeChannels(): Promise<void> {
           previous_api_subscriber_count = api_subscriber_count,
           api_subscriber_count          = ?,
           next_milestone                = ?,
-          cap_subscriber_count          = ?,
           last_polled_at                = ?,
           last_api_changed_at           = ?,
           updated_at                    = ?
@@ -144,10 +142,9 @@ export async function pollYoutubeChannels(): Promise<void> {
 
           if (!existing) {
             const nextMilestone = getNextMilestone(apiCount);
-            const cap = computeCap(apiCount, env.ESTIMATION_SAFETY_RATIO);
             insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
             insertPollState.run(
-              item.id, apiCount, nextMilestone, cap,
+              item.id, apiCount, nextMilestone,
               polledAt, polledAt, polledAt, polledAt,
             );
             seededCount++;
@@ -157,10 +154,9 @@ export async function pollYoutubeChannels(): Promise<void> {
             unchangedCount++;
           } else {
             const nextMilestone = getNextMilestone(apiCount);
-            const cap = computeCap(apiCount, env.ESTIMATION_SAFETY_RATIO);
             insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
             updatePollStateChanged.run(
-              apiCount, nextMilestone, cap,
+              apiCount, nextMilestone,
               polledAt, polledAt, polledAt,
               item.id,
             );

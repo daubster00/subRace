@@ -17,7 +17,6 @@ export default async function Home() {
 
   const config: ClientConfig = {
     youtubePollIntervalHours: env.YOUTUBE_POLL_INTERVAL_HOURS,
-    estimationSafetyRatio: env.ESTIMATION_SAFETY_RATIO,
     rankAlertAbsoluteThreshold: env.RANK_ALERT_ABSOLUTE_THRESHOLD,
     rankAlertTimeThresholdHours: env.RANK_ALERT_TIME_THRESHOLD_HOURS,
     timezone: env.TIMEZONE,

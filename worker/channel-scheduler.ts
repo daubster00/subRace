@@ -62,7 +62,7 @@ const COUNT_UNAPPLIED = `
   SELECT COUNT(*) AS n FROM display_event_schedule WHERE channel_id = ? AND applied = 0
 `;
 const SELECT_DUE = `
-  SELECT e.id, e.magnitude, d.display_subscriber_count AS disp, d.cap_subscriber_count AS cap
+  SELECT e.id, e.magnitude, d.display_subscriber_count AS disp
   FROM   display_event_schedule e
   JOIN   display_state d ON d.channel_id = e.channel_id
   WHERE  e.channel_id = ? AND e.applied = 0 AND e.scheduled_at <= ?
@@ -89,7 +89,7 @@ const selDue          = db.prepare(SELECT_DUE);
 const markApplied     = db.prepare(MARK_APPLIED);
 const updateDisplay   = db.prepare(UPDATE_DISPLAY);
 
-interface DueRow { id: number; magnitude: number; disp: number; cap: number }
+interface DueRow { id: number; magnitude: number; disp: number }
 
 function clearChannelTimer(channelId: string): void {
   const t = timers.get(channelId);
@@ -130,7 +130,6 @@ function fire(channelId: string): void {
         let running = due[0]!.disp; // JOIN상 모든 행 동일 → 첫 행 기준 누적
         for (const ev of due) {
           let next = running + ev.magnitude;
-          if (next > ev.cap) next = ev.cap; // 안전망(정상 경로엔 미작동)
           if (next < 1) next = 1;
           const direction = ev.magnitude > 0 ? 'up' : ev.magnitude < 0 ? 'down' : null;
           markApplied.run(nowIso, ev.id);

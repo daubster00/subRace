@@ -30,7 +30,6 @@ const envSchema = z.object({
   // unless you've pinned CLIENT_VIDEO_ID.
   YOUTUBE_LIKES_POLL_INTERVAL_HOURS: z.coerce.number().min(0.01).default(0.5),
   SURGE_WINDOW_HOURS: z.coerce.number().min(0.01).default(24),
-  ESTIMATION_SAFETY_RATIO: z.coerce.number().min(0).max(1).default(0.85),
   // DEPRECATED (2026-06-06, BUG-01): 구 half-life 회귀 전용. 새 pace 알고리즘은
   // 날짜 무관·최근 N개 순서 기반이라 planner가 더 이상 참조하지 않는다 (날짜
   // window가 과거 마일스톤을 굶겨 fixed 오분류를 만든 원인). .env 호환 위해

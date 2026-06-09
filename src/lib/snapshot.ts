@@ -16,10 +16,9 @@ const ChannelSchema = z.object({
   name:            z.string(),
   thumbnailUrl:    z.string().nullable(),
   subscriberCount: z.number().int(),
-  // Forward-projected count "as of serverTime" using growthRatePerHour and
-  // ESTIMATION_SAFETY_RATIO — same formula the client interpolation hook uses.
-  // Lets the first paint (SSR / cold tab) start at a natural drifted value
-  // instead of snapping to the stale polled value.
+  // 사전 스케줄 아키텍처 이후 forward-projection은 사장. 서버 display값을 그대로
+  // 보내며 estimatedSubscriberCount = subscriberCount. 필드는 client/zod 스키마
+  // 호환을 위해 남김.
   estimatedSubscriberCount: z.number().int(),
   previousSubscriberCount: z.number().int().nullable(),
   videoCount:      z.number().int().nullable(),

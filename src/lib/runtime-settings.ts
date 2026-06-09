@@ -13,7 +13,6 @@ export const overridableShape = {
   YOUTUBE_POLL_INTERVAL_HOURS:       z.coerce.number().min(0.01),
   YOUTUBE_LIKES_POLL_INTERVAL_HOURS: z.coerce.number().min(0.01),
   SURGE_WINDOW_HOURS:                z.coerce.number().min(0.01),
-  ESTIMATION_SAFETY_RATIO:           z.coerce.number().min(0).max(1),
   RANK_ALERT_ABSOLUTE_THRESHOLD:     z.coerce.number().int().min(0),
   RANK_ALERT_TIME_THRESHOLD_HOURS:   z.coerce.number().min(0),
   LIVE_VIEWER_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(1),
