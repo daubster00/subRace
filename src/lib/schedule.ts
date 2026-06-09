@@ -32,6 +32,14 @@ const N_MAX_RANGE = 300;
 // N = round(absNet / TARGET_MAG). 평균이 중간값이 되도록 설계.
 const TARGET_MAG = 5;
 
+// magHardMax 동적 증가의 절대 상한 (2026-06-09 CF-12). N이 N_PHYS_MAX에 캡되어
+// 평균 magnitude가 기본 maxMagnitude의 절반(=5)을 넘으면 magHardMax를
+// round(2×avg)로 올려 다양화를 회복하되, 이 상한을 넘지 않도록 묶는다.
+// → 극단 absNet(예: overdue 클램프 재발)에서도 단일 이벤트 ≤ 30 보장. absNet이
+// 580×30/2=8700을 넘으면 한 사이클에 절대 다 못 닫지만, 사용자 시각상 ±30
+// 이내의 점프가 우선이라는 결정(CF-9 후속).
+const MAG_HARD_MAX_CAP = 30;
+
 // 빈 슬롯 회피 임계: absNet < EMPTY_SLOT_THRESHOLD_RATIO × N이면 적응 분배.
 // 정규 분배에서 (absNet + counterTotal) / nTrend < 1이 되는 지점 = 0.8N.
 const EMPTY_SLOT_THRESHOLD_RATIO = 0.8;
@@ -205,11 +213,16 @@ export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
     if (N > N_PHYS_MAX) N = N_PHYS_MAX;
   }
 
-  // Step 2: MAG_HARD_MAX 동적 조정 (N이 캡됐고 absNet이 기본 capacity 초과 시)
+  // Step 2: MAG_HARD_MAX 동적 조정. 2026-06-09 CF-12: 트리거 조건을
+  // "평균 magnitude > magHardMax/2"로 완화 (이전: N 캡 + absNet > N×maxMag).
+  // 이전 조건은 평균이 maxMagnitude 가까이 붙어도 동적 증가가 안 돼 분포가
+  // 9~10에 몰리는 단조 문제 발생 (TAIKISLIFE 사례). 새 조건은 평균이 항상
+  // magHardMax/2 부근이 되도록 유지해 distributeRandom의 variance 폭을 확보.
+  // 단 MAG_HARD_MAX_CAP(=30) 상한으로 단일 이벤트 점프를 시각적 한도 안에 가둠.
   let magHardMax = opts.maxMagnitude;
-  if (N === N_PHYS_MAX && absAbsNet > N_PHYS_MAX * magHardMax) {
-    const avgMag = absAbsNet / N;
-    magHardMax = Math.round(2 * avgMag);
+  const avgMag = absAbsNet / N;
+  if (avgMag > magHardMax / 2) {
+    magHardMax = Math.min(MAG_HARD_MAX_CAP, Math.round(2 * avgMag));
   }
 
   // Step 3+4: 분배 분기

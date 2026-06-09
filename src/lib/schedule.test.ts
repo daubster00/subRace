@@ -111,18 +111,29 @@ describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
     }
   });
 
-  // CF-8: 큰 absNet (>5800) → MAG_HARD_MAX 동적 증가로 한 사이클에 다 닫음.
-  it('absNet > 5800: MAG_HARD_MAX 동적 증가, 합 정확', () => {
-    for (const net of [6100, 10_000, 20_000, -8000]) {
+  // CF-12: 트리거 조건 완화 (avgMag > magHardMax/2, 즉 absNet > N×5).
+  // magHardMax = min(MAG_HARD_MAX_CAP=30, round(2×avg)).
+  // absNet ≤ 580×30 = 17,400이면 한 사이클에 합 정확히 닫음.
+  it('absNet 중간~큰 (3000~15000): magHardMax 동적 증가 + 합 정확', () => {
+    for (const net of [3500, 6100, 10_000, 15_000, -8000]) {
       const rng = lcg(net + 17);
       const events = buildCycleEvents({ ...base, netDelta: net, rng });
       expect(events.length).toBe(580);
       const sum = events.reduce((a, e) => a + e.magnitude, 0);
       expect(sum).toBe(net);
-      // 평균 magnitude가 10을 초과하므로 일부 magnitude > 10 존재
+      // |각 magnitude| ≤ MAG_HARD_MAX_CAP(=30)
       const maxMag = Math.max(...events.map((e) => Math.abs(e.magnitude)));
-      expect(maxMag).toBeGreaterThan(10);
+      expect(maxMag).toBeLessThanOrEqual(30);
     }
+  });
+
+  // CF-12: absNet이 N×CAP(=17,400) 넘으면 cap에 걸려 합 < absNet (다음 사이클 이월).
+  it('absNet > N×CAP: 합 < absNet, max ≤ 30', () => {
+    const rng = lcg(20_000);
+    const events = buildCycleEvents({ ...base, netDelta: 20_000, rng });
+    const sum = events.reduce((a, e) => a + e.magnitude, 0);
+    expect(sum).toBeLessThan(20_000);
+    for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(30);
   });
 
   it('netDelta=0 → 빈 스케줄', () => {
