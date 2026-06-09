@@ -103,8 +103,9 @@ describe('planTargetCycle', () => {
   });
 
   // CF-8 (2026-06-09): absNet < SMALL_ABSNET_THRESHOLD(1160) → N=random[175,300],
-  // absNet < 0.8N이면 적응 분배(모든 ±1, ±1 오차 가능).
-  it('작은 absNet: random N + 적응 분배 (모든 ±1)', () => {
+  // absNet < 0.8N이면 적응 분배.
+  // CF-10: 모든 ±1 고정에서 ±1~5 균등 랜덤으로 변경. 합은 슬롯별 편차로 흔들림.
+  it('작은 absNet: random N + 적응 분배 (|mag|=1~5)', () => {
     // step=100, target=5,000,095, full=95 → absNet=95 → small + adaptive (95 < 0.8N)
     const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
@@ -112,15 +113,17 @@ describe('planTargetCycle', () => {
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(3));
     expect(plan.phase).toBe('normal');
     expect(plan.target).toBe(5_000_095);
-    // 적응 분배는 ±1 오차 허용 (N 짝수일 때 P=(N+95)/2 반올림)
-    expect(Math.abs(plan.netDelta - 95)).toBeLessThanOrEqual(1);
+    expect(plan.netDelta).toBeGreaterThan(0);
     expect(sum(plan.events)).toBe(plan.netDelta);
     // N은 [175, 300] 범위
     expect(plan.events.length).toBeGreaterThanOrEqual(175);
     expect(plan.events.length).toBeLessThanOrEqual(300);
-    // 모든 이벤트가 ±1
-    for (const e of plan.events) expect(Math.abs(e.magnitude)).toBe(1);
-    // 추세(+1)와 감소(-1) 모두 존재
+    // 모든 이벤트의 |magnitude| ∈ [1, 5]
+    for (const e of plan.events) {
+      expect(Math.abs(e.magnitude)).toBeGreaterThanOrEqual(1);
+      expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(5);
+    }
+    // 추세와 감소 모두 존재
     expect(plan.events.some((e) => e.magnitude > 0)).toBe(true);
     expect(plan.events.some((e) => e.magnitude < 0)).toBe(true);
   });
@@ -143,7 +146,7 @@ describe('planTargetCycle', () => {
     expect(plan.events.length).toBe(cfg.bounceCount); // 100
   });
 
-  it('하락 추세 normal: netDelta 음수, 이벤트 합 일치 (적응 분배)', () => {
+  it('하락 추세 normal: netDelta 음수, 모든 magnitude는 ±1~5 범위 (적응 분배)', () => {
     const counts = [5_000_500, 5_000_400, 5_000_300, 5_000_200, 5_000_100, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
@@ -152,8 +155,11 @@ describe('planTargetCycle', () => {
     expect(plan.target).toBe(4_999_905);
     expect(plan.netDelta).toBeLessThan(0);
     expect(sum(plan.events)).toBe(plan.netDelta);
-    // 모든 magnitude ±1 (적응 분배)
-    for (const e of plan.events) expect(Math.abs(e.magnitude)).toBe(1);
+    // CF-10: 적응 분배 magnitude는 ±1~5 균등 랜덤
+    for (const e of plan.events) {
+      expect(Math.abs(e.magnitude)).toBeGreaterThanOrEqual(1);
+      expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(5);
+    }
   });
 
   // CF-8 (2026-06-09): 회귀 검증. display > api여도 catch-up으로 깎지 않음.
@@ -170,6 +176,8 @@ describe('planTargetCycle', () => {
   });
 
   // CF-4 (2026-06-09): overdue 채널은 full gap을 한 사이클에 닫음.
+  // CF-10: 적응 분배 magnitude가 ±1~5 랜덤이라 합 = events 총합 일치만 검증
+  // (full≈95라 적응 분배 영역; netDelta는 events 합이 그대로 들어감).
   it('overdue: 예상 도착 지나친 채널은 full gap 클램프로 닫는다', () => {
     const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
@@ -177,8 +185,7 @@ describe('planTargetCycle', () => {
     const now = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 10 * HOUR);
     const plan = planTargetCycle(api, api, ms, cfg, now, lcg(13));
     expect(plan.phase).toBe('normal');
-    // 적응 분배 ±1 오차 허용
-    expect(Math.abs(plan.netDelta - 95)).toBeLessThanOrEqual(1);
+    expect(plan.netDelta).toBeGreaterThan(0);
     expect(sum(plan.events)).toBe(plan.netDelta);
   });
 

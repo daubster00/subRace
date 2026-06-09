@@ -39,9 +39,16 @@ const COUNTER_SLOT_RATIO = 0.10;
 // 감소 한 번당 magnitude. "내려가는 것처럼만 보이게" 1.
 const COUNTER_MAG = 1;
 
-// 진동(bounce) 이벤트 한 개의 최대 절대 magnitude. 진폭(amp)이 큰 채널에서도
-// 한 번에 점프하는 양은 ±10 안쪽으로 묶음.
-export const BOUNCE_PER_EVENT_MAGNITUDE = 10;
+// 적응 분배(작은 absNet) 슬롯당 magnitude 절대값 범위.
+// 모든 슬롯이 ±1 고정이던 걸 ±1~5 균등 랜덤으로 변경(2026-06-09 CF-10).
+// 평균값(3)으로 P/Q를 재산출해 합 기댓값이 absNet이 되게 한다.
+const SMALL_ADAPTIVE_MAX_MAG = 5;
+const SMALL_ADAPTIVE_AVG_MAG = (1 + SMALL_ADAPTIVE_MAX_MAG) / 2;
+
+// 진동(bounce) 이벤트 한 개의 magnitude 절대값 범위 [1, MAX].
+// 부호는 amplitude(±amp) 안에 들어오는 쪽으로 자동 결정. 양쪽 다 가능하면 랜덤.
+// 2026-06-09 CF-10: 기존 -10~+10 균등에서 |mag|=1~5 랜덤으로 변경(0 박힘 제거).
+export const BOUNCE_PER_EVENT_MAGNITUDE = 5;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -207,16 +214,19 @@ export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   let merged: number[];
   if (absAbsNet < EMPTY_SLOT_THRESHOLD_RATIO * N) {
     // 적응 분배: absNet이 너무 작아 정규 분배 시 빈 슬롯 발생.
-    // 10% 규칙 무시, 모든 슬롯을 ±1로 채움.
-    //   P(추세 슬롯) = (N + absAbsNet) / 2
-    //   Q(감소 슬롯) = N − P
-    //   합 = P − Q = absAbsNet (홀짝성 때문에 ±1 오차 가능)
-    const P = Math.round((N + absAbsNet) / 2);
+    // 모든 슬롯에 |mag|=1~5 균등 랜덤(빈 슬롯 없음, 단조 ±1보다 자연).
+    //   P(추세 슬롯) - Q(감소 슬롯) = absNet / AVG_MAG, P + Q = N
+    //   → P = (N + absNet/AVG_MAG) / 2
+    // 합 기댓값 = (P−Q) × AVG_MAG = absNet. 실제 합은 슬롯별 랜덤 편차로
+    // ±√N×stddev 정도 흔들리고 다음 사이클 plan이 자연 보정.
+    const diff = Math.round(absAbsNet / SMALL_ADAPTIVE_AVG_MAG);
+    const P = Math.max(0, Math.min(N, Math.round((N + diff) / 2)));
     const Q = N - P;
     const counterPositions = pickRandomSlots(N, Q, rng);
     merged = new Array<number>(N);
     for (let i = 0; i < N; i++) {
-      merged[i] = counterPositions.has(i) ? -trendDir : trendDir;
+      const absMag = 1 + Math.floor(rng() * SMALL_ADAPTIVE_MAX_MAG);
+      merged[i] = counterPositions.has(i) ? -trendDir * absMag : trendDir * absMag;
     }
   } else {
     // 정규 분배: 10% 감소 + 추세 슬롯은 다양 magnitude.
@@ -366,10 +376,11 @@ export interface BuildBounceOpts {
   rng?: () => number;
 }
 
-// target 도달 후 진동 (target-bounce). 한 번에 ±BOUNCE_PER_EVENT_MAGNITUDE(=10)
-// 이내의 작은 무작위 step으로 누적 위치가 ±amplitude 안에 머무는 랜덤 워크.
-// 종료 시 누적이 정확히 0으로 돌아오지 않을 수 있음(드리프트 ≤ maxEach) —
-// 다음 사이클의 plan이 새 gap으로 자연스럽게 보정.
+// target 도달 후 진동 (target-bounce). 각 step의 |mag|=1~5 균등 랜덤이고
+// 부호는 누적 pos가 ±amplitude 안에 머물도록 자동 결정 — 양 부호 다 가능하면
+// 50/50 랜덤, 한쪽만 가능하면 그 쪽 강제. 가능하면 0은 박지 않는다.
+// 종료 시 누적이 정확히 0으로 돌아오지 않을 수 있음 — 다음 사이클의 plan이
+// 새 gap으로 자연스럽게 보정.
 export function buildBounceEvents(opts: BuildBounceOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
   const amp = Math.max(1, Math.round(opts.amplitude));
@@ -379,10 +390,22 @@ export function buildBounceEvents(opts: BuildBounceOpts): ScheduledEvent[] {
   const mags: number[] = [];
   let pos = 0;
   for (let i = 0; i < n; i++) {
-    const lo = Math.max(-maxEach, -amp - pos);
-    const hi = Math.min(maxEach, amp - pos);
-    if (lo >= hi) { mags.push(0); continue; }
-    const mag = Math.round(lo + rng() * (hi - lo));
+    // amplitude 양쪽 여유. 1 미만이면 그 방향으로는 어떤 양수 mag도 못 박음.
+    const posRoom = amp - pos;
+    const negRoom = amp + pos;
+    const absMag = 1 + Math.floor(rng() * maxEach); // 1~maxEach
+    const posCapped = Math.min(absMag, posRoom);
+    const negCapped = Math.min(absMag, negRoom);
+    let mag: number;
+    if (posCapped >= 1 && negCapped >= 1) {
+      mag = rng() < 0.5 ? posCapped : -negCapped;
+    } else if (posCapped >= 1) {
+      mag = posCapped;
+    } else if (negCapped >= 1) {
+      mag = -negCapped;
+    } else {
+      mag = 0;
+    }
     mags.push(mag);
     pos += mag;
   }

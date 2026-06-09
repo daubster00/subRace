@@ -24,32 +24,32 @@ describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
     jitterRatio: 0.5,
   };
 
-  // 매우 작은 absNet → 항상 적응 분배 (모든 ±1).
+  // 매우 작은 absNet → 항상 적응 분배 (|mag|=1~5 균등 랜덤).
   // 적응 분배 조건: absNet < 0.8N. N=random[175,300] → N_min×0.8=140
   // 따라서 absNet < 140이면 어떤 N에서도 적응 분배 보장.
-  it('매우 작은 absNet (<140): 모든 magnitude는 ±1', () => {
+  // CF-10: 모든 ±1 고정에서 ±1~5 균등 랜덤으로 변경. 합 기댓값 = absNet이지만
+  // 슬롯별 랜덤 편차로 실제 합은 ±√N×stddev 흔들림 (다음 사이클이 자연 보정).
+  it('매우 작은 absNet (<140): |magnitude| ∈ [1, 5]', () => {
     for (const net of [50, 100, 130, -50, -100]) {
       const rng = lcg(net + 100);
       const events = buildCycleEvents({ ...base, netDelta: net, rng });
       expect(events.length).toBeGreaterThanOrEqual(175);
       expect(events.length).toBeLessThanOrEqual(300);
-      for (const e of events) expect(Math.abs(e.magnitude)).toBe(1);
-      const sum = events.reduce((a, e) => a + e.magnitude, 0);
-      // 적응 분배는 정수 보정으로 ±1 오차 가능
-      expect(Math.abs(sum - net)).toBeLessThanOrEqual(1);
+      for (const e of events) {
+        expect(Math.abs(e.magnitude)).toBeGreaterThanOrEqual(1);
+        expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(5);
+      }
     }
   });
 
   // 작은~중간 absNet (140 ≤ absNet < 1160): N=random[175,300], 분기 가능.
-  // 적응 또는 정규 분배. 합은 어느 쪽이든 ±1 오차 안.
-  it('작은~중간 absNet: N은 [175, 300], 합 ±1 오차', () => {
+  // 적응 분배(±1~5)면 합 오차 큼, 정규 분배면 정확.
+  it('작은~중간 absNet: N은 [175, 300]', () => {
     for (const net of [200, 500, 800, -300, -700]) {
       const rng = lcg(net + 200);
       const events = buildCycleEvents({ ...base, netDelta: net, rng });
       expect(events.length).toBeGreaterThanOrEqual(175);
       expect(events.length).toBeLessThanOrEqual(300);
-      const sum = events.reduce((a, e) => a + e.magnitude, 0);
-      expect(Math.abs(sum - net)).toBeLessThanOrEqual(1);
     }
   });
 
@@ -131,11 +131,15 @@ describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
     expect(events).toHaveLength(0);
   });
 
-  // CF-8: 작은 absNet (적응 분배)에서 빈 슬롯(0 magnitude) 없음.
-  it('적응 분배: 모든 슬롯이 ±1, 0 슬롯 없음', () => {
+  // CF-8/CF-10: 작은 absNet (적응 분배)에서 빈 슬롯(0 magnitude) 없음.
+  // CF-10에서 magnitude는 ±1~5 균등 랜덤이지만 0은 절대 박지 않는다.
+  it('적응 분배: 모든 슬롯이 ±(1~5), 0 슬롯 없음', () => {
     const rng = lcg(123);
     const events = buildCycleEvents({ ...base, netDelta: 50, rng });
-    for (const e of events) expect(e.magnitude).not.toBe(0);
+    for (const e of events) {
+      expect(e.magnitude).not.toBe(0);
+      expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(5);
+    }
   });
 
   // 다양성: 정규 분배 (충분히 큰 absNet)에서 magnitude가 1~maxMag에 분포.
@@ -224,11 +228,12 @@ describe('buildCatchUpEvents', () => {
 });
 
 describe('buildBounceEvents', () => {
-  it('한 이벤트 magnitude ≤ 10 (BOUNCE_PER_EVENT_MAGNITUDE)', () => {
+  // CF-10: |mag| ≤ BOUNCE_PER_EVENT_MAGNITUDE=5 (이전 10에서 변경).
+  it('한 이벤트 |magnitude| ≤ 5 (BOUNCE_PER_EVENT_MAGNITUDE)', () => {
     for (const amp of [100, 1000, 10_000]) {
       const rng = lcg(amp);
       const events = buildBounceEvents({ amplitude: amp, count: 60, cycleMs: CYCLE, jitterRatio: 0.5, rng });
-      for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(10);
+      for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(5);
     }
   });
 
