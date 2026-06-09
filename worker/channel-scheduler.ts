@@ -181,12 +181,13 @@ function replanAndArm(channelId: string, trigger: PlanTrigger): void {
   armTimer(channelId);
 }
 
-// 새 마일스톤(YouTube API 변경) 트리거 — youtube-channels.ts가 호출.
-// planOneChannel이 미적용 이벤트(target 플랜)를 전면 삭제 → catch-up 플랜으로
-// 교체. 사용자 의도: catch-up이 발동하면 target 플랜이 세운 이벤트를 모두
-// 비우고 1시간 catch-up 스케줄로 갈아끼움.
-export function onNewMilestone(channelId: string): void {
-  replanAndArm(channelId, 'milestone');
+// 2026-06-09 CF-9: catch-up 비활성화. youtube-channels가 새 마일스톤을 감지해
+// 이 함수를 호출해도 아무것도 하지 않는다. 새 latest는 다음 cycle 만료 시
+// planTargetCycle이 자연스럽게 흡수한다 — full = target_new − display가 커지면
+// predictedHours로 나뉘어 사이클당 적정 페이스로 따라가고, overdue로 빠지면
+// 1시간 안에 다 닫는다. catch-up(5s 간격 ±40)이 만들던 별도 점프를 제거.
+export function onNewMilestone(_channelId: string): void {
+  // no-op
 }
 
 // 워커 시작 시: 기존 스케줄이 있으면(재시작 복구) 재무장, 없으면 새로 계획.
