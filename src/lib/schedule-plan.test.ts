@@ -102,9 +102,9 @@ describe('planTargetCycle', () => {
     expect(plan.events).toHaveLength(0);
   });
 
-  // CF-8 (2026-06-09): absNet < SMALL_ABSNET_THRESHOLD(1160) → N=random[175,300],
+  // CF-8 (2026-06-09): absNet < SMALL_ABSNET_THRESHOLD(1160) → N=random[100,300],
   // absNet < 0.8N이면 적응 분배.
-  // CF-10: 모든 ±1 고정에서 ±1~5 균등 랜덤으로 변경. 합은 슬롯별 편차로 흔들림.
+  // CF-10: ±1 고정 → ±1~5 균등 랜덤. CF-11: N_MIN 175→100.
   it('작은 absNet: random N + 적응 분배 (|mag|=1~5)', () => {
     // step=100, target=5,000,095, full=95 → absNet=95 → small + adaptive (95 < 0.8N)
     const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
@@ -115,8 +115,8 @@ describe('planTargetCycle', () => {
     expect(plan.target).toBe(5_000_095);
     expect(plan.netDelta).toBeGreaterThan(0);
     expect(sum(plan.events)).toBe(plan.netDelta);
-    // N은 [175, 300] 범위
-    expect(plan.events.length).toBeGreaterThanOrEqual(175);
+    // N은 [100, 300] 범위
+    expect(plan.events.length).toBeGreaterThanOrEqual(100);
     expect(plan.events.length).toBeLessThanOrEqual(300);
     // 모든 이벤트의 |magnitude| ∈ [1, 5]
     for (const e of plan.events) {

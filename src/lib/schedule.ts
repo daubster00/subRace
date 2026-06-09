@@ -22,8 +22,10 @@ const N_PHYS_MAX = 580;
 
 // 작은 absNet 채널의 N(이벤트 개수) 보장 범위.
 // absNet < SMALL_ABSNET_THRESHOLD면 [N_MIN_RANGE, N_MAX_RANGE] 사이 랜덤.
+// 2026-06-09 CF-11: N_MIN 175→100. N=100이면 슬롯 간격 36초 — 이벤트가
+// 덜 빈번하게 발생해 잔잔한 채널의 시각적 평온함을 더 강하게 보장.
 const SMALL_ABSNET_THRESHOLD = 1_160;
-const N_MIN_RANGE = 175;
+const N_MIN_RANGE = 100;
 const N_MAX_RANGE = 300;
 
 // 큰 absNet 케이스의 이벤트당 평균 목표 magnitude (= MAG_HARD_MAX / 2).
@@ -176,7 +178,7 @@ export interface BuildCycleOpts {
 // Normal phase 사이클 — 자네 의도 알고리즘 (2026-06-09 CF-8 재설계, plan 문서 §알고리즘).
 //
 // Step 1: N(이벤트 개수) 결정
-//   absNet < SMALL_ABSNET_THRESHOLD(1160) → random([175, 300])
+//   absNet < SMALL_ABSNET_THRESHOLD(1160) → random([100, 300])
 //   absNet ≥ 1160                        → round(absNet / TARGET_MAG=5), N_PHYS_MAX=580 캡
 //
 // Step 2: MAG_HARD_MAX 동적 조정 (N이 N_PHYS_MAX에 캡됐을 때만)

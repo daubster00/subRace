@@ -25,15 +25,14 @@ describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
   };
 
   // 매우 작은 absNet → 항상 적응 분배 (|mag|=1~5 균등 랜덤).
-  // 적응 분배 조건: absNet < 0.8N. N=random[175,300] → N_min×0.8=140
-  // 따라서 absNet < 140이면 어떤 N에서도 적응 분배 보장.
-  // CF-10: 모든 ±1 고정에서 ±1~5 균등 랜덤으로 변경. 합 기댓값 = absNet이지만
-  // 슬롯별 랜덤 편차로 실제 합은 ±√N×stddev 흔들림 (다음 사이클이 자연 보정).
-  it('매우 작은 absNet (<140): |magnitude| ∈ [1, 5]', () => {
-    for (const net of [50, 100, 130, -50, -100]) {
+  // 적응 분배 조건: absNet < 0.8N. N=random[100,300] → N_min×0.8=80
+  // 따라서 absNet < 80이면 어떤 N에서도 적응 분배 보장.
+  // CF-10: ±1 고정 → ±1~5 균등 랜덤. CF-11: N_MIN 175→100.
+  it('매우 작은 absNet (<80): |magnitude| ∈ [1, 5]', () => {
+    for (const net of [10, 30, 50, 70, -10, -50]) {
       const rng = lcg(net + 100);
       const events = buildCycleEvents({ ...base, netDelta: net, rng });
-      expect(events.length).toBeGreaterThanOrEqual(175);
+      expect(events.length).toBeGreaterThanOrEqual(100);
       expect(events.length).toBeLessThanOrEqual(300);
       for (const e of events) {
         expect(Math.abs(e.magnitude)).toBeGreaterThanOrEqual(1);
@@ -42,13 +41,13 @@ describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
     }
   });
 
-  // 작은~중간 absNet (140 ≤ absNet < 1160): N=random[175,300], 분기 가능.
+  // 작은~중간 absNet (80 ≤ absNet < 1160): N=random[100,300], 분기 가능.
   // 적응 분배(±1~5)면 합 오차 큼, 정규 분배면 정확.
-  it('작은~중간 absNet: N은 [175, 300]', () => {
+  it('작은~중간 absNet: N은 [100, 300]', () => {
     for (const net of [200, 500, 800, -300, -700]) {
       const rng = lcg(net + 200);
       const events = buildCycleEvents({ ...base, netDelta: net, rng });
-      expect(events.length).toBeGreaterThanOrEqual(175);
+      expect(events.length).toBeGreaterThanOrEqual(100);
       expect(events.length).toBeLessThanOrEqual(300);
     }
   });
