@@ -2,8 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   planCatchUp,
   planTargetCycle,
-  computeActivityN,
-  computeDynamicCounterRatio,
   type PlanConfig,
 } from './schedule-plan';
 import type { MilestoneRow } from './milestone-delta';
@@ -25,26 +23,22 @@ function milestones(hours: number[], counts: number[]): MilestoneRow[] {
 }
 
 // 기본 now: 마지막 마일스톤 시각 그대로 — elapsed=0이라 예상 도착까지의
-// 남은 시간 == expectedInterval로 환원. 기존 테스트의 시간 가정 보존용.
+// 남은 시간 == expectedInterval로 환원.
 function nowAtLatest(ms: MilestoneRow[]): Date {
   return new Date(ms[ms.length - 1]!.polled_at);
 }
 
 const cfg: PlanConfig = {
   minMilestones: 3,
-  minEvents: 6,
   maxMagnitude: 40,
   normalMaxMagnitude: 10,
-  counterRatio: 0.2,
   cycleMs: HOUR,
   catchUpIntervalMs: 3_000,
   targetRatio: 0.95,
   bounceStepRatio: 0.03,
   paceMaxIntervals: 8,
   jitterRatio: 0.5,
-  activityNMin: 40,
-  activityNMax: 100,
-  activityPivot: 300,
+  bounceCount: 100,
 };
 
 const sum = (es: { magnitude: number }[]) => es.reduce((a, e) => a + e.magnitude, 0);
@@ -54,13 +48,12 @@ describe('planCatchUp', () => {
     const api = 5_000_000;
     const plan = planCatchUp(api, api - 50, cfg, lcg(2));
     expect(plan.phase).toBe('catch-up');
-    expect(plan.display).toBe(api - 50); // 현재 화면값 유지(시작점)
+    expect(plan.display).toBe(api - 50);
     expect(plan.target).toBe(api);
     expect(plan.netDelta).toBe(50);
     expect(sum(plan.events)).toBe(50);
     expect(plan.events.every((e) => e.magnitude > 0)).toBe(true);
     expect(plan.events.every((e) => e.magnitude <= 40)).toBe(true);
-    // 3초 고정 간격 — i × 3000.
     plan.events.forEach((e, i) => expect(e.offsetMs).toBe(i * 3_000));
   });
 
@@ -75,14 +68,13 @@ describe('planCatchUp', () => {
   });
 
   it('큰 갭: 사이클(1h)에 묶이지 않고 매그니튜드 다양', () => {
-    // 다양화: T≈1786 trend + C≈94 counter → N≈1880. 합 = absNet.
     const api = 5_000_000;
     const plan = planCatchUp(api, api - 50_000, cfg, lcg(7));
     expect(plan.events.length).toBeGreaterThanOrEqual(1_780);
     expect(plan.events.length).toBeLessThanOrEqual(1_950);
     expect(sum(plan.events)).toBe(50_000);
     const last = plan.events[plan.events.length - 1]!;
-    expect(last.offsetMs).toBeGreaterThan(HOUR); // 사이클(1h) 초과 — 의도된 동작
+    expect(last.offsetMs).toBeGreaterThan(HOUR);
   });
 
   it('신규 시드(currentDisplay=null) → display=api, 빈 스케줄', () => {
@@ -102,40 +94,45 @@ describe('planCatchUp', () => {
 
 describe('planTargetCycle', () => {
   it('fixed: 마일스톤 < minMilestones → api 고정, 스케줄 없음', () => {
-    const ms = milestones([0, 1], [4_995_000, 5_000_000]); // 2개 < 3
+    const ms = milestones([0, 1], [4_995_000, 5_000_000]);
     const plan = planTargetCycle(5_000_000, 4_900_000, ms, cfg, nowAtLatest(ms), lcg(1));
     expect(plan.phase).toBe('fixed');
-    expect(plan.display).toBe(5_000_000); // api값으로 고정
+    expect(plan.display).toBe(5_000_000);
     expect(plan.target).toBe(5_000_000);
     expect(plan.events).toHaveLength(0);
   });
 
-  it('normal: display == api → target 향해 시간당 목표만큼, pace로 나눔', () => {
-    // step=100, 1시간 간격 → target = 5_000_000 + 0.95×100 = 5_000_095, full=95
-    // predictedHours=1 → netDelta = 95 × (1/1) = 95
+  // CF-8 (2026-06-09): absNet < SMALL_ABSNET_THRESHOLD(1160) → N=random[175,300],
+  // absNet < 0.8N이면 적응 분배(모든 ±1, ±1 오차 가능).
+  it('작은 absNet: random N + 적응 분배 (모든 ±1)', () => {
+    // step=100, target=5,000,095, full=95 → absNet=95 → small + adaptive (95 < 0.8N)
     const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(3));
     expect(plan.phase).toBe('normal');
     expect(plan.target).toBe(5_000_095);
-    expect(plan.netDelta).toBe(95);
-    expect(sum(plan.events)).toBe(95);
-    // 동적 counterRatio (absNet 작아 ~0.5) → 감소 이벤트 다수 섞임
+    // 적응 분배는 ±1 오차 허용 (N 짝수일 때 P=(N+95)/2 반올림)
+    expect(Math.abs(plan.netDelta - 95)).toBeLessThanOrEqual(1);
+    expect(sum(plan.events)).toBe(plan.netDelta);
+    // N은 [175, 300] 범위
+    expect(plan.events.length).toBeGreaterThanOrEqual(175);
+    expect(plan.events.length).toBeLessThanOrEqual(300);
+    // 모든 이벤트가 ±1
+    for (const e of plan.events) expect(Math.abs(e.magnitude)).toBe(1);
+    // 추세(+1)와 감소(-1) 모두 존재
+    expect(plan.events.some((e) => e.magnitude > 0)).toBe(true);
     expect(plan.events.some((e) => e.magnitude < 0)).toBe(true);
-    expect(plan.events.every((e) => Math.abs(e.magnitude) <= 20)).toBe(true);
   });
 
-  it('target-bounce: 추세 0(정체) → 진폭 ±300 범위 안에서 ±10 jitter 랜덤 워크', () => {
+  it('target-bounce: 추세 0(정체) → 진폭 ±300 범위에서 ±10 jitter 랜덤 워크', () => {
     const flat = Array(6).fill(5_000_000);
     const ms = milestones([0, 1, 2, 3, 4, 5], flat);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(4));
     expect(plan.phase).toBe('target-bounce');
     expect(plan.netDelta).toBe(0);
-    // 한 이벤트 magnitude ≤ 10
     for (const e of plan.events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(10);
-    // 누적 위치(target에서의 편차)가 ±amp(=300) 안에
     let pos = 0;
     let maxAbs = 0;
     for (const e of plan.events) {
@@ -143,10 +140,10 @@ describe('planTargetCycle', () => {
       maxAbs = Math.max(maxAbs, Math.abs(pos));
     }
     expect(maxAbs).toBeLessThanOrEqual(300);
+    expect(plan.events.length).toBe(cfg.bounceCount); // 100
   });
 
-  it('하락 추세 normal: netDelta 음수, 이벤트 합 일치', () => {
-    // step=-100, 1시간 간격 → target = 5_000_000 + 0.95×(-100) = 4_999_905
+  it('하락 추세 normal: netDelta 음수, 이벤트 합 일치 (적응 분배)', () => {
     const counts = [5_000_500, 5_000_400, 5_000_300, 5_000_200, 5_000_100, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
@@ -155,124 +152,78 @@ describe('planTargetCycle', () => {
     expect(plan.target).toBe(4_999_905);
     expect(plan.netDelta).toBeLessThan(0);
     expect(sum(plan.events)).toBe(plan.netDelta);
+    // 모든 magnitude ±1 (적응 분배)
+    for (const e of plan.events) expect(Math.abs(e.magnitude)).toBe(1);
   });
 
-  // 활동성 곡선(2026-06-08, 2026-06-09 갱신): 하위 채널은 N_MAX 근처 이벤트 +
-  // NORMAL_COUNTER_RATIO(10%) 감소.
-  it('하위 채널(작은 absNet) → 이벤트 수 minEvents 근처 + 감소 ~10%', () => {
-    const counts = [4_999_950, 4_999_960, 4_999_970, 4_999_980, 4_999_990, 5_000_000];
-    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
-    const api = 5_000_000;
-    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(11));
-    expect(plan.phase).toBe('normal');
-    expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(15);
-    // N_MAX=100 → minEvents=89. T≥89, C≈9 → 총 N≈98 이상.
-    expect(plan.events.length).toBeGreaterThan(60);
-    const negCount = plan.events.filter((e) => e.magnitude < 0).length;
-    // NORMAL_COUNTER_RATIO 10% 근방. 작은 absNet에서 변동 폭 고려해 5~25% 허용.
-    expect(negCount / plan.events.length).toBeGreaterThan(0.05);
-    expect(negCount / plan.events.length).toBeLessThan(0.25);
-  });
-
-  // 회귀 검증 (2026-06-08): 사용자 피드백 #2.
-  // 정상 운영 결과로 display가 api 위로 살짝 떠 있을 때, 사이클 만료 트리거가
-  // 이걸 깎아내리지 않는다. display != api라는 이유만으로 catch-up downward를
-  // 발동시키던 과거 동작에 대한 회귀.
+  // CF-8 (2026-06-09): 회귀 검증. display > api여도 catch-up으로 깎지 않음.
   it('회귀: display > api여도 catch-up으로 깎지 않음 (target 플랜만 적용)', () => {
-    // 마일스톤 12개 모두 같은 값 — trendSign=0 → target-bounce 직행.
     const flat = Array(12).fill(5_000_000);
     const ms = milestones(Array.from({ length: 12 }, (_, i) => i), flat);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api + 39, ms, cfg, nowAtLatest(ms), lcg(99));
     expect(plan.phase).toBe('target-bounce');
-    expect(plan.display).toBe(api + 39); // 떠 있는 display 그대로
-    expect(plan.netDelta).toBe(0);       // CyclePlan에 기록되는 의도 net (드리프트는 별도)
-    // 이벤트 합은 정확히 0이 아닐 수 있음(랜덤 워크 드리프트) — 단 amp 안.
-    // api=5M → bucket unit 10k × bounceStepRatio 0.01 = amp 100.
-    expect(Math.abs(sum(plan.events))).toBeLessThanOrEqual(100);
+    expect(plan.display).toBe(api + 39);
+    expect(plan.netDelta).toBe(0);
+    // bounce 드리프트 ≤ amp(=300, api=5M의 1% bucket × 3%)
+    expect(Math.abs(sum(plan.events))).toBeLessThanOrEqual(300);
   });
 
-  // 회귀 검증 (2026-06-09): 사용자 피드백 #3.
-  // 예상 도착 시각을 지나친(overdue) 채널은 사이클 안에 gap을 다 닫아야 함.
-  // ISSEI 시나리오: 평균 간격 1시간, 마지막 마일스톤으로부터 10시간 경과.
-  it('overdue: 예상 도착 지나친 채널은 한 사이클에 full gap 클램프로 닫는다', () => {
-    // step=100, 1시간 간격 → target=5,000,095, display=5,000,000 → full=95.
-    // now = latest + 10h → 9h overdue → predictedHours=0.001 → raw=95×1/0.001=거대
-    // → |raw|>=|full| 클램프로 netDelta=full(95).
+  // CF-4 (2026-06-09): overdue 채널은 full gap을 한 사이클에 닫음.
+  it('overdue: 예상 도착 지나친 채널은 full gap 클램프로 닫는다', () => {
     const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const now = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 10 * HOUR);
     const plan = planTargetCycle(api, api, ms, cfg, now, lcg(13));
     expect(plan.phase).toBe('normal');
-    expect(plan.netDelta).toBe(95); // full gap을 한 사이클에 다 닫음
-    expect(sum(plan.events)).toBe(95);
+    // 적응 분배 ±1 오차 허용
+    expect(Math.abs(plan.netDelta - 95)).toBeLessThanOrEqual(1);
+    expect(sum(plan.events)).toBe(plan.netDelta);
   });
 
-  // 정상 흐름 검증: 경과 시간만큼 남은 시간 줄어 pace 가속.
-  it('경과 절반: predictedHours 절반으로 줄어 netDelta 2배', () => {
-    // expectedInterval=10h, full=9500. fresh / half-elapsed 비교로 pace 가속만 검증.
-    // (1h cycle + 큰 full은 4.2초 간격 제약에 캡되어 netDelta가 슬롯 용량으로 축소되므로
-    //  여기선 absNet이 작아 캡이 안 걸리는 구간으로 검증.)
+  // CF-4 검증: 경과 시간에 따라 pace 가속. absNet 크기로 분기.
+  it('경과 절반: predictedHours 절반으로 줄어 netDelta 2배 (정규 분배 케이스)', () => {
+    // expectedInterval=10h, full=9500.
+    // fresh: remaining=10h → raw=950 → small, 적응 분배 (950 < 1160)
+    // half : remaining=5h  → raw=1900 → deterministic, 정규 분배
     const slowCounts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
-    const slowMs = milestones([0, 10, 20, 30, 40, 50], slowCounts); // 간격 10h
+    const slowMs = milestones([0, 10, 20, 30, 40, 50], slowCounts);
     const api = 5_000_000;
     const slowFresh = nowAtLatest(slowMs);
     const slowHalf = new Date(Date.parse(slowMs[slowMs.length - 1]!.polled_at) + 5 * HOUR);
     const slowPlanFresh = planTargetCycle(api, api, slowMs, cfg, slowFresh, lcg(17));
     const slowPlanHalf  = planTargetCycle(api, api, slowMs, cfg, slowHalf,  lcg(17));
-    // fresh: remaining=10h → raw=9500/10=950
-    // half : remaining=5h  → raw=9500/5 =1900
-    expect(slowPlanFresh.netDelta).toBe(950);
+    // fresh: absNet=950 < 1160 → 적응 분배. ±1 오차 허용
+    expect(Math.abs(slowPlanFresh.netDelta - 950)).toBeLessThanOrEqual(1);
+    // half: absNet=1900 > 1160 → 정규 분배. 정확히 1900
     expect(slowPlanHalf.netDelta).toBe(1_900);
   });
 
-  // 5.5초 간격 제약(2026-06-09 customer feedback): 큰 absNet은 슬롯 용량으로
-  // 축소되어 한 사이클에 전부 닫지 않고 다음 사이클로 넘긴다.
-  it('1h 사이클 × 5.5s 간격 = 슬롯 654개 → netDelta 6,540(=654×maxMag) 이하로 축소', () => {
-    // expectedInterval=1h, full=9500. overdue 없이도 fresh에서 raw=9500.
-    // 5.5초 간격 제약으로 슬롯 654개 캡 → 추세 슬롯×maxMag(=10)으로 absNet 축소.
+  // CF-8 (2026-06-09): N_PHYS_MAX=580 캡, absNet > 5800이면 MAG_HARD_MAX 동적 증가.
+  it('큰 absNet (>5800): N 캡 + MAG_HARD_MAX 동적 증가로 한 사이클에 다 닫음', () => {
+    // step=10k, target=5,009,500, full=9500. expectedInterval=1h, fresh.
+    // raw=9500 → |raw|≥|full| → netDelta=9500. > 5800 → MAG_HARD_MAX 동적.
     const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(17));
-    expect(Math.abs(plan.netDelta)).toBeLessThan(9_500); // 축소됨
-    expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(654 * cfg.normalMaxMagnitude);
-    // 이벤트 합과 일치
-    const sum = plan.events.reduce((s, e) => s + e.magnitude, 0);
-    expect(plan.netDelta).toBe(sum);
-    // 인접 간격 ≥ 5500ms
+    expect(plan.phase).toBe('normal');
+    // absNet=9500 → 580 슬롯에서 평균 magnitude ~16.4 → MAG_HARD_MAX=round(2×16.4)=33
+    // distributeRandom으로 정확히 9500 분배
+    expect(plan.netDelta).toBe(9_500);
+    expect(sum(plan.events)).toBe(9_500);
+    expect(plan.events.length).toBe(580);
+    // 인접 간격 ≥ 6200ms (MIN_EVENT_INTERVAL_MS)
     for (let i = 1; i < plan.events.length; i++) {
-      expect(plan.events[i]!.offsetMs - plan.events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(5_500);
+      const a = plan.events[i - 1]!.offsetMs;
+      const b = plan.events[i]!.offsetMs;
+      // wrap 경계는 음수 가능 — 양의 차이로 처리하면 (b-a + cycleMs) % cycleMs
+      const gap = (b - a + HOUR) % HOUR;
+      // wrap 경계가 아닌 경우만 (마지막 wrap 차이는 cycleMs - (N-1)×slot)
+      if (gap < HOUR / 2) {
+        expect(gap).toBeGreaterThanOrEqual(6_200);
+      }
     }
-  });
-});
-
-describe('computeActivityN', () => {
-  const c = { ...cfg };
-  it('absNet=0 → N_MAX', () => expect(computeActivityN(0, c)).toBe(100));
-  it('absNet ≥ pivot → N_MIN', () => {
-    expect(computeActivityN(300, c)).toBe(40);
-    expect(computeActivityN(1_000, c)).toBe(40);
-    expect(computeActivityN(10_000, c)).toBe(40);
-  });
-  it('제곱근 곡선: 하위 구간이 가파르게 N_MAX 근처', () => {
-    expect(computeActivityN(10, c)).toBeGreaterThan(80);
-    const n50 = computeActivityN(50, c);
-    expect(n50).toBeGreaterThan(60);
-    expect(n50).toBeLessThan(85);
-    expect(computeActivityN(200, c)).toBeLessThan(60);
-  });
-});
-
-describe('computeDynamicCounterRatio', () => {
-  it('absNet 작음 → counter slot이 N의 절반에 클램프', () => {
-    // N=89, absNet=10 → nTrendMin=1, slots=min(88, 44)=44 → ratio=44/89
-    expect(computeDynamicCounterRatio(10, 89, 20)).toBeCloseTo(44 / 89, 3);
-    expect(computeDynamicCounterRatio(10, 89, 20)).toBeLessThanOrEqual(0.5);
-  });
-  it('absNet이 N×maxMag을 초과 → counter 0 (catch-up 전량 추세)', () => {
-    // N=40, absNet=5000 → nTrendMin=250 > N → slots=0
-    expect(computeDynamicCounterRatio(5_000, 40, 20)).toBe(0);
   });
 });

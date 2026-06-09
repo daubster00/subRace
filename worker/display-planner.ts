@@ -110,19 +110,15 @@ export function planOneChannel(
   const cycleMs = env.SCHEDULE_CYCLE_HOURS * 3_600_000;
   const cfg = {
     minMilestones: env.SCHEDULE_MIN_MILESTONES,
-    minEvents: env.SCHEDULE_MIN_EVENTS,
     maxMagnitude: env.SCHEDULE_MAX_MAGNITUDE,
     normalMaxMagnitude: env.SCHEDULE_NORMAL_MAX_MAGNITUDE,
-    counterRatio: env.SCHEDULE_COUNTER_RATIO,
     cycleMs,
     catchUpIntervalMs: env.SCHEDULE_CATCHUP_INTERVAL_MS,
     targetRatio: env.SCHEDULE_TARGET_RATIO,
     bounceStepRatio: env.SCHEDULE_BOUNCE_STEP_RATIO,
     paceMaxIntervals: env.SCHEDULE_PACE_MAX_INTERVALS,
     jitterRatio: env.SCHEDULE_EVENT_JITTER_RATIO,
-    activityNMin: env.SCHEDULE_ACTIVITY_N_MIN,
-    activityNMax: env.SCHEDULE_ACTIVITY_N_MAX,
-    activityPivot: env.SCHEDULE_ACTIVITY_PIVOT,
+    bounceCount: env.SCHEDULE_BOUNCE_COUNT,
   };
 
   const api = poll.api_subscriber_count;

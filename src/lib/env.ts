@@ -57,38 +57,23 @@ const envSchema = z.object({
   // - PACE_MAX_INTERVALS: 예상 도달 시간 산출에 쓸 최근 인접 간격 최대 수.
   // - EVENT_JITTER_RATIO: 이벤트 시각 분산 비율.
   SCHEDULE_MIN_MILESTONES: z.coerce.number().int().min(2).default(3),
-  // 활동성 곡선 — 한 시간 사이클 안에 발생하는 이벤트 수 N을 absNet에 따라 동적
-  // 산출 (2026-06-08, customer feedback). 51~100위 채널처럼 absNet이 작은 곳도
-  // 시간당 N번은 움직이도록 강제. counterRatio도 N - 추세슬롯에서 자동 도출되어
-  // absNet이 작을수록 감소 이벤트 비율이 커진다.
-  //   N = round( N_MIN + (N_MAX - N_MIN) × (1 - sqrt(min(1, absNet / PIVOT))) )
-  // 곡선 의미: absNet 0 → N_MAX, absNet ≥ PIVOT → N_MIN, 사이는 제곱근으로 감소
-  // (=하위 구간이 가파르게 활동성 상승).
-  SCHEDULE_ACTIVITY_N_MIN: z.coerce.number().int().min(1).default(40),
-  SCHEDULE_ACTIVITY_N_MAX: z.coerce.number().int().min(1).default(100),
-  SCHEDULE_ACTIVITY_PIVOT: z.coerce.number().int().min(1).default(300),
-  // DEPRECATED (2026-06-08): SCHEDULE_ACTIVITY_* 곡선이 대체. planner는 더 이상
-  // 참조하지 않으나 .env / runtime-settings 호환 위해 schema에 남김.
-  SCHEDULE_MIN_EVENTS: z.coerce.number().int().min(1).default(6),
-  // catch-up 전용 절대 상한. 사이클(1h)에 묶이지 않고 catchUpIntervalMs(3s) 고정
-  // 간격으로 N=ceil(absNet/maxMag)개를 박는다 — 큰 갭은 자연히 1h 넘게 걸린다.
-  // normal은 SCHEDULE_NORMAL_MAX_MAGNITUDE 사용.
+  // catch-up 전용 절대 상한. 사이클(1h)에 묶이지 않고 catchUpIntervalMs(5s) 고정
+  // 간격으로 N=ceil(absNet/maxMag)개를 박는다. normal은 SCHEDULE_NORMAL_MAX_MAGNITUDE.
   SCHEDULE_MAX_MAGNITUDE: z.coerce.number().int().min(1).default(40),
-  // catch-up 이벤트 사이 고정 간격(ms). 클라 효과(트레이스/글로우/휠 ≈ 4.2s)가
-  // 다음 이벤트 전에 완전히 끝나도록 4.2s + 0.8s 버퍼 = 5s가 기본
-  // (2026-06-08 customer feedback). 사이클 길이와 무관하게 채널마다 갭 크기에
-  // 따라 총 소요 시간이 달라진다.
+  // catch-up 이벤트 사이 고정 간격(ms). 클라 모션(트레이스/글로우/휠 ≈ 4.2s)이
+  // 다음 이벤트 전에 완전히 끝나도록 4.2s + 0.8s 버퍼 = 5s가 기본.
   SCHEDULE_CATCHUP_INTERVAL_MS: z.coerce.number().int().min(100).default(5000),
-  // normal/target-bounce 사이클 이벤트당 절대 상한 (2026-06-08, customer feedback).
-  // 큰 채널은 절대값이 커도 한 번에 큰 step으로 점프하면 간격이 멀어 정체로 보임 →
-  // catch-up보다 작은 상한으로 잦은 소액 변화 유도. catch-up은 따로 큰 상한 유지.
+  // normal/target-bounce 사이클 이벤트당 절대 상한. CF-8 재설계 후 buildCycleEvents가
+  // 큰 absNet에서 동적으로 키울 수 있음 (N이 N_PHYS_MAX=580에 캡됐을 때만).
   SCHEDULE_NORMAL_MAX_MAGNITUDE: z.coerce.number().int().min(1).default(10),
-  SCHEDULE_COUNTER_RATIO: z.coerce.number().min(0).max(0.5).default(0.20),
   SCHEDULE_CYCLE_HOURS: z.coerce.number().min(0.1).default(1),
   SCHEDULE_TARGET_RATIO: z.coerce.number().min(0).max(2).default(0.95),
   SCHEDULE_BOUNCE_STEP_RATIO: z.coerce.number().min(0).max(1).default(0.01),
   SCHEDULE_PACE_MAX_INTERVALS: z.coerce.number().int().min(1).default(8),
   SCHEDULE_EVENT_JITTER_RATIO: z.coerce.number().min(0).max(1).default(0.5),
+  // target-bounce phase에서 사용할 이벤트 개수. 적당히 자주 진동하도록 N_MAX_RANGE
+  // 근처(=300)로 설정 (2026-06-09 CF-8).
+  SCHEDULE_BOUNCE_COUNT: z.coerce.number().int().min(2).default(300),
   RANK_ALERT_ABSOLUTE_THRESHOLD: z.coerce.number().int().min(0).default(3000),
   RANK_ALERT_TIME_THRESHOLD_HOURS: z.coerce.number().min(0).default(0.25),
   LIVE_VIEWER_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(1).default(60),

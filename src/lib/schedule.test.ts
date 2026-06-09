@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { buildCatchUpEvents, buildCycleEvents, buildBounceEvents } from './schedule';
+import {
+  buildCatchUpEvents,
+  buildCycleEvents,
+  buildBounceEvents,
+  MIN_EVENT_INTERVAL_MS,
+} from './schedule';
 
 // 결정적 rng (LCG) — 테스트 재현성.
 function lcg(seed: number): () => number {
@@ -12,56 +17,71 @@ function lcg(seed: number): () => number {
 
 const CYCLE = 3_600_000; // 1h
 
-describe('buildCycleEvents', () => {
+describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
   const base = {
     cycleMs: CYCLE,
-    minEvents: 6,
-    maxMagnitude: 20,
+    maxMagnitude: 10,
     jitterRatio: 0.5,
   };
 
-  it('Σ magnitude === netDelta (정상, counterRatio 0.2) — 여러 net에 대해', () => {
-    for (const net of [0, 5, 37, 120, 480, -55, -300, 1000, -1000]) {
-      const rng = lcg(net + 100000);
-      const events = buildCycleEvents({ ...base, netDelta: net, counterRatio: 0.2, rng });
+  // 매우 작은 absNet → 항상 적응 분배 (모든 ±1).
+  // 적응 분배 조건: absNet < 0.8N. N=random[175,300] → N_min×0.8=140
+  // 따라서 absNet < 140이면 어떤 N에서도 적응 분배 보장.
+  it('매우 작은 absNet (<140): 모든 magnitude는 ±1', () => {
+    for (const net of [50, 100, 130, -50, -100]) {
+      const rng = lcg(net + 100);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
+      expect(events.length).toBeGreaterThanOrEqual(175);
+      expect(events.length).toBeLessThanOrEqual(300);
+      for (const e of events) expect(Math.abs(e.magnitude)).toBe(1);
+      const sum = events.reduce((a, e) => a + e.magnitude, 0);
+      // 적응 분배는 정수 보정으로 ±1 오차 가능
+      expect(Math.abs(sum - net)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  // 작은~중간 absNet (140 ≤ absNet < 1160): N=random[175,300], 분기 가능.
+  // 적응 또는 정규 분배. 합은 어느 쪽이든 ±1 오차 안.
+  it('작은~중간 absNet: N은 [175, 300], 합 ±1 오차', () => {
+    for (const net of [200, 500, 800, -300, -700]) {
+      const rng = lcg(net + 200);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
+      expect(events.length).toBeGreaterThanOrEqual(175);
+      expect(events.length).toBeLessThanOrEqual(300);
+      const sum = events.reduce((a, e) => a + e.magnitude, 0);
+      expect(Math.abs(sum - net)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  // 큰 absNet (≥ 1160 AND ≤ 5800) → 정규 분배. 합 정확.
+  it('큰 absNet (정규 분배 영역): Σ magnitude === netDelta', () => {
+    for (const net of [1160, 2000, 3000, 5000, -1500, -3000]) {
+      const rng = lcg(net + 7);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
       const sum = events.reduce((a, e) => a + e.magnitude, 0);
       expect(sum).toBe(net);
     }
   });
 
-  it('Σ magnitude === netDelta (catch-up, counterRatio 0)', () => {
-    for (const net of [50, 300, -200, 7]) {
-      const rng = lcg(net + 7);
-      const events = buildCycleEvents({ ...base, netDelta: net, counterRatio: 0, rng });
-      expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(net);
-    }
-  });
-
-  it('|각 magnitude| <= maxMagnitude', () => {
+  it('|각 magnitude| ≤ maxMagnitude (정규 분배)', () => {
     const rng = lcg(42);
-    const events = buildCycleEvents({ ...base, netDelta: 480, counterRatio: 0.2, rng });
-    for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(20);
+    const events = buildCycleEvents({ ...base, netDelta: 2000, rng });
+    for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(10);
   });
 
-  it('이벤트 수 >= minEvents', () => {
-    const rng = lcg(1);
-    const events = buildCycleEvents({ ...base, netDelta: 3, counterRatio: 0.2, rng });
-    expect(events.length).toBeGreaterThanOrEqual(6);
-  });
-
-  // 2026-06-09: buildCycleEvents는 normal phase 전용으로 항상 ~10% 감소 슬롯
-  // (NORMAL_COUNTER_RATIO). 호출 측의 counterRatio 인자는 무시됨. catch-up은
-  // buildCatchUpEvents가 담당.
-  it('normal 상승: counterRatio 인자와 무관하게 항상 감소 일부 섞임', () => {
-    const rng = lcg(123);
-    const events = buildCycleEvents({ ...base, netDelta: 400, counterRatio: 0, rng });
-    expect(events.some((e) => e.magnitude < 0)).toBe(true);
-    expect(events.some((e) => e.magnitude > 0)).toBe(true);
+  // CF-8: 양방향 항상 섞임 (적응 분배든 정규 분배든 감소 슬롯 존재).
+  it('양방향 항상 섞임 — 추세와 감소 모두 존재', () => {
+    for (const net of [200, 2000, -2000]) {
+      const rng = lcg(net + 1);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
+      expect(events.some((e) => e.magnitude > 0)).toBe(true);
+      expect(events.some((e) => e.magnitude < 0)).toBe(true);
+    }
   });
 
   it('offset은 [0, cycleMs) 범위 + 정렬됨', () => {
     const rng = lcg(55);
-    const events = buildCycleEvents({ ...base, netDelta: 200, counterRatio: 0.2, rng });
+    const events = buildCycleEvents({ ...base, netDelta: 2000, rng });
     for (const e of events) {
       expect(e.offsetMs).toBeGreaterThanOrEqual(0);
       expect(e.offsetMs).toBeLessThan(CYCLE);
@@ -70,94 +90,60 @@ describe('buildCycleEvents', () => {
     expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
   });
 
-  // 다양성 (2026-06-08): 큰 absNet에서 magnitude가 maxMag에 몰리지 않고 분포.
-  it('magnitude 분산: 큰 absNet에서 3가지 이상 절대값', () => {
-    for (const net of [300, 500, 1000, -800]) {
-      const rng = lcg(net + 9999);
-      const events = buildCycleEvents({
-        ...base,
-        minEvents: 40,
-        netDelta: net,
-        counterRatio: 0.3,
-        rng,
-      });
-      const uniqueAbs = new Set(events.map((e) => Math.abs(e.magnitude)));
-      expect(uniqueAbs.size, `net=${net} mags=${[...uniqueAbs]}`).toBeGreaterThanOrEqual(3);
-      // 합 일치 회귀 검증.
-      expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(net);
+  // CF-8: 인접 간격 ≥ MIN_EVENT_INTERVAL_MS = 6,200ms (모션 + 휴식).
+  it('인접 이벤트 간격 ≥ MIN_EVENT_INTERVAL_MS', () => {
+    for (const net of [500, 3000, 8000]) {
+      const rng = lcg(net + 99);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
+      // wrap된 boundary는 한 곳뿐 — 거기는 cycleMs − total_span으로 ≥ slot
+      for (let i = 1; i < events.length; i++) {
+        const gap = events[i]!.offsetMs - events[i - 1]!.offsetMs;
+        expect(gap).toBeGreaterThanOrEqual(MIN_EVENT_INTERVAL_MS);
+      }
     }
   });
 
-  it('magnitude 분산: catch-up(counterRatio=0)도 평탄화 안 됨', () => {
+  // CF-8: N_PHYS_MAX = 580 캡.
+  it('N은 N_PHYS_MAX=580을 절대 넘지 않음', () => {
+    for (const net of [3000, 5800, 10_000, 50_000]) {
+      const rng = lcg(net + 7);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
+      expect(events.length).toBeLessThanOrEqual(580);
+    }
+  });
+
+  // CF-8: 큰 absNet (>5800) → MAG_HARD_MAX 동적 증가로 한 사이클에 다 닫음.
+  it('absNet > 5800: MAG_HARD_MAX 동적 증가, 합 정확', () => {
+    for (const net of [6100, 10_000, 20_000, -8000]) {
+      const rng = lcg(net + 17);
+      const events = buildCycleEvents({ ...base, netDelta: net, rng });
+      expect(events.length).toBe(580);
+      const sum = events.reduce((a, e) => a + e.magnitude, 0);
+      expect(sum).toBe(net);
+      // 평균 magnitude가 10을 초과하므로 일부 magnitude > 10 존재
+      const maxMag = Math.max(...events.map((e) => Math.abs(e.magnitude)));
+      expect(maxMag).toBeGreaterThan(10);
+    }
+  });
+
+  it('netDelta=0 → 빈 스케줄', () => {
+    const events = buildCycleEvents({ ...base, netDelta: 0, rng: lcg(0) });
+    expect(events).toHaveLength(0);
+  });
+
+  // CF-8: 작은 absNet (적응 분배)에서 빈 슬롯(0 magnitude) 없음.
+  it('적응 분배: 모든 슬롯이 ±1, 0 슬롯 없음', () => {
+    const rng = lcg(123);
+    const events = buildCycleEvents({ ...base, netDelta: 50, rng });
+    for (const e of events) expect(e.magnitude).not.toBe(0);
+  });
+
+  // 다양성: 정규 분배 (충분히 큰 absNet)에서 magnitude가 1~maxMag에 분포.
+  it('정규 분배: magnitude가 1~maxMag 범위에 다양 분포', () => {
     const rng = lcg(31415);
-    const events = buildCycleEvents({
-      ...base,
-      minEvents: 40,
-      netDelta: 800,
-      counterRatio: 0,
-      rng,
-    });
+    const events = buildCycleEvents({ ...base, netDelta: 3000, rng });
     const uniqueAbs = new Set(events.map((e) => Math.abs(e.magnitude)));
     expect(uniqueAbs.size).toBeGreaterThanOrEqual(3);
-    expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(800);
-  });
-
-  // 2026-06-09 customer feedback: 인접 이벤트 간격 ≥ 5.5초 보장
-  // (모션 4.2초 + 휴식 ~1.3초). 모션이 한 번씩 끊겨야 테두리가 인식됨.
-  // cycle 3,600,000ms / 5,500ms = 654 슬롯 상한.
-  it('이벤트 수 상한: cycle / MIN_INTERVAL_MS = 654개 — 큰 netDelta는 absNet 축소', () => {
-    const rng = lcg(42);
-    const events = buildCycleEvents({
-      cycleMs: CYCLE,
-      minEvents: 40,
-      maxMagnitude: 10,
-      netDelta: 50_000, // 비현실적으로 큰 absNet
-      counterRatio: 0.2,
-      jitterRatio: 0.5,
-      rng,
-    });
-    expect(events.length).toBeLessThanOrEqual(654);
-    for (let i = 1; i < events.length; i++) {
-      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(5_500);
-    }
-    const delivered = events.reduce((a, e) => a + e.magnitude, 0);
-    expect(Math.abs(delivered)).toBeLessThan(50_000);
-    expect(Math.abs(delivered)).toBeLessThanOrEqual(654 * 10);
-  });
-
-  it('이벤트 수 상한: 음수 netDelta도 동일하게 축소', () => {
-    const rng = lcg(43);
-    const events = buildCycleEvents({
-      cycleMs: CYCLE,
-      minEvents: 40,
-      maxMagnitude: 10,
-      netDelta: -50_000,
-      counterRatio: 0.2,
-      jitterRatio: 0.5,
-      rng,
-    });
-    expect(events.length).toBeLessThanOrEqual(654);
-    for (let i = 1; i < events.length; i++) {
-      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(5_500);
-    }
-    const delivered = events.reduce((a, e) => a + e.magnitude, 0);
-    expect(delivered).toBeLessThan(0);
-    expect(Math.abs(delivered)).toBeLessThan(50_000);
-  });
-
-  it('상한 미달은 기존 동작 유지: net 1000 → 합 일치, 슬롯 < 654', () => {
-    const rng = lcg(44);
-    const events = buildCycleEvents({
-      cycleMs: CYCLE,
-      minEvents: 40,
-      maxMagnitude: 20,
-      netDelta: 1_000,
-      counterRatio: 0.2,
-      jitterRatio: 0.5,
-      rng,
-    });
-    expect(events.length).toBeLessThan(654);
-    expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(1_000);
   });
 });
 
@@ -173,8 +159,6 @@ describe('buildCatchUpEvents', () => {
   });
 
   it('작은 net (N<10): 단방향, 휴식·감소 없음, 순수 i×interval', () => {
-    // 다양화로 T = ceil(absNet / (maxMag×0.7)) = ceil(absNet/28). T<10 → absNet ≤ 252
-    // (정확히는 252까지 T=9). 그 이하는 R=0, C=0 → 순수 3s 페이스.
     for (const net of [40, 100, 200, 252, -150]) {
       const rng = lcg(net + 333);
       const events = buildCatchUpEvents({ ...base, netDelta: net, rng });
@@ -219,7 +203,6 @@ describe('buildCatchUpEvents', () => {
       maxGap = Math.max(maxGap, gap);
     }
     expect(restCount / events.length).toBeLessThanOrEqual(0.10);
-    // 휴식 한 번에 추가 ≤ 2s → 최대 인접 간격 ≤ 3s + 2s.
     expect(maxGap).toBeLessThanOrEqual(3_000 + 2_000);
   });
 
@@ -232,10 +215,8 @@ describe('buildCatchUpEvents', () => {
     const rng = lcg(123);
     const events = buildCatchUpEvents({ ...base, netDelta: 50_000, rng });
     expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(50_000);
-    // 다양화: T = ceil(50000/28) ≈ 1786 trend + C ≈ 94 counter → N ≈ 1880.
     expect(events.length).toBeGreaterThanOrEqual(1_780);
     expect(events.length).toBeLessThanOrEqual(1_950);
-    // 모든 추세 슬롯이 40으로 평탄화되지 않아야 함 (=평균 ≈ 28).
     const trendMags = events.filter((e) => e.magnitude > 0).map((e) => e.magnitude);
     const uniqueTrend = new Set(trendMags);
     expect(uniqueTrend.size).toBeGreaterThan(5);
@@ -243,7 +224,6 @@ describe('buildCatchUpEvents', () => {
 });
 
 describe('buildBounceEvents', () => {
-  // 2026-06-09 customer feedback: 한 이벤트는 ±10 안쪽, 누적 위치는 ±amp 안쪽.
   it('한 이벤트 magnitude ≤ 10 (BOUNCE_PER_EVENT_MAGNITUDE)', () => {
     for (const amp of [100, 1000, 10_000]) {
       const rng = lcg(amp);
@@ -258,9 +238,6 @@ describe('buildBounceEvents', () => {
       const events = buildBounceEvents({ amplitude: amp, count: 100, cycleMs: CYCLE, jitterRatio: 0.5, rng });
       let pos = 0;
       let maxAbs = 0;
-      // 시간순 정렬된 events를 순서대로 적용한 누적 위치 추적.
-      // assignTimes가 sort by offsetMs 하지만 jitter가 작아 magnitudes 입력 순서와
-      // 거의 동일 — 그래도 시간순으로 누적 검증.
       for (const e of events) {
         pos += e.magnitude;
         maxAbs = Math.max(maxAbs, Math.abs(pos));
@@ -279,8 +256,7 @@ describe('buildBounceEvents', () => {
     const rng = lcg(42);
     const events = buildBounceEvents({ amplitude: 1_000, count: 100, cycleMs: CYCLE, jitterRatio: 0.5, rng });
     const unique = new Set(events.map((e) => e.magnitude));
-    expect(unique.size).toBeGreaterThan(5); // 무작위 분포 검증
-    // ±10 영역에서 양/음 모두 등장
+    expect(unique.size).toBeGreaterThan(5);
     expect(events.some((e) => e.magnitude > 0)).toBe(true);
     expect(events.some((e) => e.magnitude < 0)).toBe(true);
   });
