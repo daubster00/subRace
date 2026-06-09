@@ -99,12 +99,18 @@ function shuffle<T>(arr: T[], rng: () => number): T[] {
   return a;
 }
 
-// 부호 있는 magnitude 슬롯 배열에 시각을 부여. 균등 분배 + ±jitter.
+// 부호 있는 magnitude 슬롯 배열에 시각을 부여. 균등 분배 + ±jitter + 채널 위상.
 //
 // jitter 폭은 두 제약 중 작은 쪽으로 클램프:
 //   (a) 원래 jitterRatio 기반 폭        = jitterRatio × slot / 2
 //   (b) 인접 간격 ≥ MIN_EVENT_INTERVAL_MS 보장 폭 = max(0, (slot − MIN) / 2)
 // 슬롯이 빠듯할수록(MIN에 가까울수록) jitter는 0에 수렴.
+//
+// 채널별 phaseShift: 슬롯 수가 같은 cap된 채널들이 같은 시각에 일제 발화하는
+// lock-step 동기화를 방지하기 위해 시작 위상을 [0, cycleMs) 안에서 무작위로
+// 어긋트림. slot = cycleMs/N이므로 모듈로 wrap이 슬롯 간격을 정확히 보존
+// (인접 슬롯 사이 거리 = slot, 마지막 wrap 슬롯과 첫 슬롯 사이도 slot).
+// (2026-06-09 customer feedback: 3·5·7·10·12·13위 채널 동시 발화.)
 function assignTimes(
   magnitudes: number[],
   cycleMs: number,
@@ -116,11 +122,11 @@ function assignTimes(
   const safeJitterMax = Math.max(0, (slot - MIN_EVENT_INTERVAL_MS) / 2);
   const rawJitterMax = (jitterRatio * slot) / 2;
   const jitterMax = Math.min(rawJitterMax, safeJitterMax);
+  const phaseShift = rng() * cycleMs;
   const events: ScheduledEvent[] = magnitudes.map((magnitude, i) => {
     const jitter = (rng() - 0.5) * 2 * jitterMax;
-    let offsetMs = Math.round(i * slot + slot / 2 + jitter);
-    if (offsetMs < 0) offsetMs = 0;
-    if (offsetMs >= cycleMs) offsetMs = cycleMs - 1;
+    const raw = i * slot + slot / 2 + jitter + phaseShift;
+    const offsetMs = ((Math.round(raw) % cycleMs) + cycleMs) % cycleMs;
     return { offsetMs, magnitude };
   });
   events.sort((a, b) => a.offsetMs - b.offsetMs);
