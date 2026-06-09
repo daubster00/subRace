@@ -182,5 +182,10 @@ export function planTargetCycle(
     jitterRatio: cfg.jitterRatio,
     rng,
   });
-  return { phase: 'normal', display, target, netDelta, events };
+  // buildCycleEvents가 4.2초 간격 제약으로 슬롯 수를 캡하면 absNet이 축소될 수
+  // 있다. 실제 이 사이클이 전달하는 변화량은 이벤트 합과 일치 — 그대로 반환해
+  // display_state.today_delta가 진짜 적용분을 가리키게 한다. 모자라는 양은
+  // 다음 사이클(재계획)에서 새 gap으로 다시 잡힌다.
+  const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
+  return { phase: 'normal', display, target, netDelta: actualNetDelta, events };
 }

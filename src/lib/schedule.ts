@@ -3,10 +3,20 @@
 // 한 채널의 1시간 사이클에 대해 (시각 offset, 부호 있는 magnitude) 이벤트 배열을
 // 만든다. 핵심 불변식:
 //   1. Σ magnitude === netDelta            (정확히 일치 — 마지막 보정 불필요)
+//      단, 슬롯이 모션 간격 제약에 캡되면 absNet이 축소될 수 있음 → 호출 측이
+//      Σ magnitude를 새 netDelta로 사용 (planTargetCycle).
 //   2. |각 magnitude| <= maxMagnitude       (호출 측이 phase별로 주입: normal 10, catch-up 20)
 //   3. 이벤트 수 >= minEvents               (시간당 최소 6 — 화면 안 멈춤)
 //   4. 추세/반대 방향 개수 고정(확률 X)      (80/20 → 우연한 몰림 구조적 불가, 항목 6)
 //   5. 시각은 균등 분배 + jitter             (메트로놈 방지 + 휴식 구간)
+//   6. 인접 이벤트 간격 ≥ MIN_EVENT_INTERVAL_MS — 화면 모션이 한 번씩 완주.
+
+// 클라이언트 테두리/숫자 모션 지속시간(useInterpolatedSnapshot.ts의
+// MOTION_TOTAL_DURATION_MS와 동기). 이벤트가 이 값보다 짧은 간격으로 박히면
+// 직전 모션이 끝나기 전에 새 모션이 덮어씌워져 테두리가 안 보이고 숫자만
+// 폭주하는 것처럼 보임. 사이클당 슬롯 수의 절대 상한 + jitter 폭 상한을 이
+// 값으로 강제한다(2026-06-09 customer feedback).
+export const MIN_EVENT_INTERVAL_MS = 4_200;
 
 export interface ScheduledEvent {
   offsetMs: number;  // 사이클 시작으로부터의 ms. [0, cycleMs)
@@ -86,6 +96,11 @@ function shuffle<T>(arr: T[], rng: () => number): T[] {
 }
 
 // 부호 있는 magnitude 슬롯 배열에 시각을 부여. 균등 분배 + ±jitter.
+//
+// jitter 폭은 두 제약 중 작은 쪽으로 클램프:
+//   (a) 원래 jitterRatio 기반 폭        = jitterRatio × slot / 2
+//   (b) 인접 간격 ≥ MIN_EVENT_INTERVAL_MS 보장 폭 = max(0, (slot − MIN) / 2)
+// 슬롯이 빠듯할수록(MIN에 가까울수록) jitter는 0에 수렴.
 function assignTimes(
   magnitudes: number[],
   cycleMs: number,
@@ -94,9 +109,11 @@ function assignTimes(
 ): ScheduledEvent[] {
   const n = magnitudes.length;
   const slot = cycleMs / n;
+  const safeJitterMax = Math.max(0, (slot - MIN_EVENT_INTERVAL_MS) / 2);
+  const rawJitterMax = (jitterRatio * slot) / 2;
+  const jitterMax = Math.min(rawJitterMax, safeJitterMax);
   const events: ScheduledEvent[] = magnitudes.map((magnitude, i) => {
-    // 슬롯 중앙 + ±(jitterRatio/2)*slot 흔들기 → 휴식 간격이 자연 분산.
-    const jitter = (rng() - 0.5) * jitterRatio * slot;
+    const jitter = (rng() - 0.5) * 2 * jitterMax;
     let offsetMs = Math.round(i * slot + slot / 2 + jitter);
     if (offsetMs < 0) offsetMs = 0;
     if (offsetMs >= cycleMs) offsetMs = cycleMs - 1;
@@ -126,31 +143,49 @@ export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
   const { cycleMs, minEvents, maxMagnitude, counterRatio, jitterRatio } = opts;
   const trendDir = opts.netDelta >= 0 ? 1 : -1;
-  const absNet = Math.abs(opts.netDelta);
+  let absNet = Math.abs(opts.netDelta);
 
   // 추세 용량만으로 필요한 최소 이벤트 수.
   const baseN = Math.max(minEvents, Math.ceil(absNet / maxMagnitude) || 1);
 
   // 반대 방향 이벤트 수 (개수 고정 — 확률 아님).
-  const nCounter = counterRatio > 0 ? Math.round(baseN * counterRatio) : 0;
+  let nCounter = counterRatio > 0 ? Math.round(baseN * counterRatio) : 0;
 
   // 반대 이벤트 1개당 평균 크기 — 작게. 평균 추세 크기의 절반 수준, 최소 1.
   const counterEachAvg =
     nCounter > 0
       ? Math.min(maxMagnitude, Math.max(1, Math.round(absNet / baseN / 2)))
       : 0;
-  const totalCounter = nCounter * counterEachAvg;
+  let totalCounter = nCounter * counterEachAvg;
 
   // 추세 이벤트가 채워야 할 총량 = 순변화 + 반대분 상쇄.
-  const requiredTrend = absNet + totalCounter;
+  let requiredTrend = absNet + totalCounter;
   // 다양화 항: 평균 magnitude를 maxMag * 0.7로 캡 → slot 수가 자동 확장.
   const nTrendDiverse = Math.ceil(requiredTrend / (maxMagnitude * 0.7)) || 1;
-  const nTrend = Math.max(
+  let nTrend = Math.max(
     baseN - nCounter,
     Math.ceil(requiredTrend / maxMagnitude) || 1,
     nTrendDiverse,
     1,
   );
+
+  // 4.2초 간격 제약: 슬롯이 사이클 / MIN_INTERVAL_MS를 넘으면 캡.
+  // 캡되면 추세/반대 슬롯을 비율 그대로 축소하고 absNet도 슬롯 용량(추세
+  // 슬롯 × maxMag − totalCounter)에 맞춰 줄인다. 모자라는 양은 다음 사이클이
+  // 자동으로 닫는다 — display_state.target은 그대로라 다음 plan이 gap만큼
+  // 새 absNet을 다시 계산.
+  const maxEventsBySpacing = Math.floor(cycleMs / MIN_EVENT_INTERVAL_MS);
+  if (nTrend + nCounter > maxEventsBySpacing) {
+    const totalN = nTrend + nCounter;
+    nCounter = Math.floor(nCounter * (maxEventsBySpacing / totalN));
+    nTrend = Math.max(1, maxEventsBySpacing - nCounter);
+    totalCounter = nCounter * counterEachAvg;
+    const cappedRequiredTrend = nTrend * maxMagnitude;
+    requiredTrend = Math.min(requiredTrend, cappedRequiredTrend);
+    absNet = Math.max(0, requiredTrend - totalCounter);
+  }
+
+  if (absNet === 0 && requiredTrend === 0) return [];
 
   const trendMags = shuffle(distributeRandom(requiredTrend, nTrend, maxMagnitude, rng), rng)
     .map((m) => trendDir * m);

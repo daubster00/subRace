@@ -202,27 +202,12 @@ describe('planTargetCycle', () => {
 
   // 정상 흐름 검증: 경과 시간만큼 남은 시간 줄어 pace 가속.
   it('경과 절반: predictedHours 절반으로 줄어 netDelta 2배', () => {
-    // step=100, 1시간 간격 → target=5,000,095, full=95. expectedInterval=1h.
-    // now = latest + 0.5h → remaining=0.5h → raw=95×1/0.5=190 → |raw|>=|full|
-    // → 클램프로 netDelta=full(95).
-    // 더 큰 케이스로 가속만 확인:
-    // step=10000, 1시간 간격 → target=5,009,500, full=9,500. expectedInterval=1h.
-    // remaining=0.5h → raw=9500×1/0.5=19000 → 클램프 netDelta=full(9500).
-    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
-    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
-    const api = 5_000_000;
-    const halfElapsed = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 0.5 * HOUR);
-    const planHalf = planTargetCycle(api, api, ms, cfg, halfElapsed, lcg(17));
-    expect(planHalf.netDelta).toBe(9_500); // full clamp
-
-    // 비교: 막 도착한 직후(elapsed=0) → remaining=1h → raw=9500 → 그대로
-    const fresh = nowAtLatest(ms);
-    const planFresh = planTargetCycle(api, api, ms, cfg, fresh, lcg(17));
-    expect(planFresh.netDelta).toBe(9_500); // 1h interval에서는 fresh도 가득 닫음
-    // 의미 있는 비교: expectedInterval=10h일 때 fresh netDelta vs half netDelta.
-    // 별도 마일스톤 셋업으로 검증.
+    // expectedInterval=10h, full=9500. fresh / half-elapsed 비교로 pace 가속만 검증.
+    // (1h cycle + 큰 full은 4.2초 간격 제약에 캡되어 netDelta가 슬롯 용량으로 축소되므로
+    //  여기선 absNet이 작아 캡이 안 걸리는 구간으로 검증.)
     const slowCounts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
     const slowMs = milestones([0, 10, 20, 30, 40, 50], slowCounts); // 간격 10h
+    const api = 5_000_000;
     const slowFresh = nowAtLatest(slowMs);
     const slowHalf = new Date(Date.parse(slowMs[slowMs.length - 1]!.polled_at) + 5 * HOUR);
     const slowPlanFresh = planTargetCycle(api, api, slowMs, cfg, slowFresh, lcg(17));
@@ -231,6 +216,26 @@ describe('planTargetCycle', () => {
     // half : remaining=5h  → raw=9500/5 =1900
     expect(slowPlanFresh.netDelta).toBe(950);
     expect(slowPlanHalf.netDelta).toBe(1_900);
+  });
+
+  // 4.2초 간격 제약(2026-06-09 customer feedback): 큰 absNet은 슬롯 용량으로
+  // 축소되어 한 사이클에 전부 닫지 않고 다음 사이클로 넘긴다.
+  it('1h 사이클 × 4.2s 간격 = 슬롯 857개 → netDelta 8,570(=857×maxMag) 이하로 축소', () => {
+    // expectedInterval=1h, full=9500. overdue 없이도 fresh에서 raw=9500.
+    // 4.2초 간격 제약으로 슬롯 857개 캡 → 추세 슬롯×maxMag(=10)으로 absNet 축소.
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
+    const api = 5_000_000;
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(17));
+    expect(Math.abs(plan.netDelta)).toBeLessThan(9_500); // 축소됨
+    expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(857 * cfg.normalMaxMagnitude);
+    // 이벤트 합과 일치
+    const sum = plan.events.reduce((s, e) => s + e.magnitude, 0);
+    expect(plan.netDelta).toBe(sum);
+    // 인접 간격 ≥ 4200ms
+    for (let i = 1; i < plan.events.length; i++) {
+      expect(plan.events[i]!.offsetMs - plan.events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(4_200);
+    }
   });
 });
 

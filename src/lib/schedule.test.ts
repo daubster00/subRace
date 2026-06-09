@@ -104,6 +104,67 @@ describe('buildCycleEvents', () => {
     expect(uniqueAbs.size).toBeGreaterThanOrEqual(3);
     expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(800);
   });
+
+  // 2026-06-09 customer feedback: 인접 이벤트 간격 ≥ 4.2초 보장.
+  // 모션 시간보다 짧은 간격으로 이벤트가 박히면 테두리 모션이 안 보이고
+  // 숫자만 폭주하는 ISSEI 증상.
+  it('이벤트 수 상한: 사이클 / 4.2s = 857개 — 큰 netDelta는 absNet 축소', () => {
+    const rng = lcg(42);
+    const events = buildCycleEvents({
+      cycleMs: CYCLE,
+      minEvents: 40,
+      maxMagnitude: 10,
+      netDelta: 50_000, // 비현실적으로 큰 absNet
+      counterRatio: 0.2,
+      jitterRatio: 0.5,
+      rng,
+    });
+    // 슬롯 수가 상한에 클램프
+    expect(events.length).toBeLessThanOrEqual(857);
+    // 인접 간격이 4.2초(=4200ms) 이상
+    for (let i = 1; i < events.length; i++) {
+      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(4_200);
+    }
+    // 슬롯 용량(857 × 10 = 8570)에 한참 못 미치는 50,000은 축소됨
+    const delivered = events.reduce((a, e) => a + e.magnitude, 0);
+    expect(Math.abs(delivered)).toBeLessThan(50_000);
+    expect(Math.abs(delivered)).toBeLessThanOrEqual(857 * 10);
+  });
+
+  it('이벤트 수 상한: 음수 netDelta도 동일하게 축소', () => {
+    const rng = lcg(43);
+    const events = buildCycleEvents({
+      cycleMs: CYCLE,
+      minEvents: 40,
+      maxMagnitude: 10,
+      netDelta: -50_000,
+      counterRatio: 0.2,
+      jitterRatio: 0.5,
+      rng,
+    });
+    expect(events.length).toBeLessThanOrEqual(857);
+    for (let i = 1; i < events.length; i++) {
+      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(4_200);
+    }
+    const delivered = events.reduce((a, e) => a + e.magnitude, 0);
+    expect(delivered).toBeLessThan(0);
+    expect(Math.abs(delivered)).toBeLessThan(50_000);
+  });
+
+  it('상한 미달은 기존 동작 유지: net 1000 → 합 일치, 슬롯 < 857', () => {
+    const rng = lcg(44);
+    const events = buildCycleEvents({
+      cycleMs: CYCLE,
+      minEvents: 40,
+      maxMagnitude: 20,
+      netDelta: 1_000,
+      counterRatio: 0.2,
+      jitterRatio: 0.5,
+      rng,
+    });
+    expect(events.length).toBeLessThan(857);
+    expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(1_000);
+  });
 });
 
 describe('buildCatchUpEvents', () => {
