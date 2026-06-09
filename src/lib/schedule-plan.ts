@@ -127,6 +127,7 @@ export function planTargetCycle(
   storedDisplay: number | null,
   milestones: MilestoneRow[],
   cfg: PlanConfig,
+  now: Date,
   rng?: () => number,
 ): CyclePlan {
   // fixed: 마일스톤 부족(cfg.minMilestones 미만) → api값 고정 표시, 스케줄 없음.
@@ -143,6 +144,7 @@ export function planTargetCycle(
 
   const predictedHours = computePredictedHoursToNextMilestone(milestones, {
     maxIntervals: cfg.paceMaxIntervals,
+    now,
   });
 
   const full = target - display;

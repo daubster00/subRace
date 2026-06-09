@@ -136,7 +136,7 @@ export function planOneChannel(
 
   const plan = trigger === 'milestone'
     ? planCatchUp(api, currentDisplay, cfg)
-    : planTargetCycle(api, currentDisplay, milestones, cfg);
+    : planTargetCycle(api, currentDisplay, milestones, cfg, now);
 
   const nowIso = now.toISOString();
   // catch-up은 사이클 길이에 묶이지 않는다 — 마지막 이벤트가 끝난 직후를 사이클

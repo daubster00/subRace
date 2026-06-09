@@ -24,6 +24,12 @@ function milestones(hours: number[], counts: number[]): MilestoneRow[] {
   }));
 }
 
+// 기본 now: 마지막 마일스톤 시각 그대로 — elapsed=0이라 예상 도착까지의
+// 남은 시간 == expectedInterval로 환원. 기존 테스트의 시간 가정 보존용.
+function nowAtLatest(ms: MilestoneRow[]): Date {
+  return new Date(ms[ms.length - 1]!.polled_at);
+}
+
 const cfg: PlanConfig = {
   minMilestones: 3,
   minEvents: 6,
@@ -97,7 +103,7 @@ describe('planCatchUp', () => {
 describe('planTargetCycle', () => {
   it('fixed: 마일스톤 < minMilestones → api 고정, 스케줄 없음', () => {
     const ms = milestones([0, 1], [4_995_000, 5_000_000]); // 2개 < 3
-    const plan = planTargetCycle(5_000_000, 4_900_000, ms, cfg, lcg(1));
+    const plan = planTargetCycle(5_000_000, 4_900_000, ms, cfg, nowAtLatest(ms), lcg(1));
     expect(plan.phase).toBe('fixed');
     expect(plan.display).toBe(5_000_000); // api값으로 고정
     expect(plan.target).toBe(5_000_000);
@@ -110,7 +116,7 @@ describe('planTargetCycle', () => {
     const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
-    const plan = planTargetCycle(api, api, ms, cfg, lcg(3));
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(3));
     expect(plan.phase).toBe('normal');
     expect(plan.target).toBe(5_000_095);
     expect(plan.netDelta).toBe(95);
@@ -124,7 +130,7 @@ describe('planTargetCycle', () => {
     const flat = Array(6).fill(5_000_000);
     const ms = milestones([0, 1, 2, 3, 4, 5], flat);
     const api = 5_000_000;
-    const plan = planTargetCycle(api, api, ms, cfg, lcg(4));
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(4));
     expect(plan.phase).toBe('target-bounce');
     expect(plan.netDelta).toBe(0);
     expect(sum(plan.events)).toBe(0);
@@ -138,7 +144,7 @@ describe('planTargetCycle', () => {
     const counts = [5_000_500, 5_000_400, 5_000_300, 5_000_200, 5_000_100, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
-    const plan = planTargetCycle(api, api, ms, cfg, lcg(5));
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(5));
     expect(plan.phase).toBe('normal');
     expect(plan.target).toBe(4_999_905);
     expect(plan.netDelta).toBeLessThan(0);
@@ -151,7 +157,7 @@ describe('planTargetCycle', () => {
     const counts = [4_999_950, 4_999_960, 4_999_970, 4_999_980, 4_999_990, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
-    const plan = planTargetCycle(api, api, ms, cfg, lcg(11));
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(11));
     expect(plan.phase).toBe('normal');
     expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(15);
     // N_MAX=100, absNet≈10 → N≈89. 50개 이상은 보장.
@@ -170,11 +176,61 @@ describe('planTargetCycle', () => {
     const flat = Array(12).fill(5_000_000);
     const ms = milestones(Array.from({ length: 12 }, (_, i) => i), flat);
     const api = 5_000_000;
-    const plan = planTargetCycle(api, api + 39, ms, cfg, lcg(99));
+    const plan = planTargetCycle(api, api + 39, ms, cfg, nowAtLatest(ms), lcg(99));
     expect(plan.phase).toBe('target-bounce');
     expect(plan.display).toBe(api + 39); // 떠 있는 display 그대로
     expect(plan.netDelta).toBe(0);       // 음수 깎기 없음
     expect(sum(plan.events)).toBe(0);
+  });
+
+  // 회귀 검증 (2026-06-09): 사용자 피드백 #3.
+  // 예상 도착 시각을 지나친(overdue) 채널은 사이클 안에 gap을 다 닫아야 함.
+  // ISSEI 시나리오: 평균 간격 1시간, 마지막 마일스톤으로부터 10시간 경과.
+  it('overdue: 예상 도착 지나친 채널은 한 사이클에 full gap 클램프로 닫는다', () => {
+    // step=100, 1시간 간격 → target=5,000,095, display=5,000,000 → full=95.
+    // now = latest + 10h → 9h overdue → predictedHours=0.001 → raw=95×1/0.001=거대
+    // → |raw|>=|full| 클램프로 netDelta=full(95).
+    const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
+    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
+    const api = 5_000_000;
+    const now = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 10 * HOUR);
+    const plan = planTargetCycle(api, api, ms, cfg, now, lcg(13));
+    expect(plan.phase).toBe('normal');
+    expect(plan.netDelta).toBe(95); // full gap을 한 사이클에 다 닫음
+    expect(sum(plan.events)).toBe(95);
+  });
+
+  // 정상 흐름 검증: 경과 시간만큼 남은 시간 줄어 pace 가속.
+  it('경과 절반: predictedHours 절반으로 줄어 netDelta 2배', () => {
+    // step=100, 1시간 간격 → target=5,000,095, full=95. expectedInterval=1h.
+    // now = latest + 0.5h → remaining=0.5h → raw=95×1/0.5=190 → |raw|>=|full|
+    // → 클램프로 netDelta=full(95).
+    // 더 큰 케이스로 가속만 확인:
+    // step=10000, 1시간 간격 → target=5,009,500, full=9,500. expectedInterval=1h.
+    // remaining=0.5h → raw=9500×1/0.5=19000 → 클램프 netDelta=full(9500).
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
+    const api = 5_000_000;
+    const halfElapsed = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 0.5 * HOUR);
+    const planHalf = planTargetCycle(api, api, ms, cfg, halfElapsed, lcg(17));
+    expect(planHalf.netDelta).toBe(9_500); // full clamp
+
+    // 비교: 막 도착한 직후(elapsed=0) → remaining=1h → raw=9500 → 그대로
+    const fresh = nowAtLatest(ms);
+    const planFresh = planTargetCycle(api, api, ms, cfg, fresh, lcg(17));
+    expect(planFresh.netDelta).toBe(9_500); // 1h interval에서는 fresh도 가득 닫음
+    // 의미 있는 비교: expectedInterval=10h일 때 fresh netDelta vs half netDelta.
+    // 별도 마일스톤 셋업으로 검증.
+    const slowCounts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const slowMs = milestones([0, 10, 20, 30, 40, 50], slowCounts); // 간격 10h
+    const slowFresh = nowAtLatest(slowMs);
+    const slowHalf = new Date(Date.parse(slowMs[slowMs.length - 1]!.polled_at) + 5 * HOUR);
+    const slowPlanFresh = planTargetCycle(api, api, slowMs, cfg, slowFresh, lcg(17));
+    const slowPlanHalf  = planTargetCycle(api, api, slowMs, cfg, slowHalf,  lcg(17));
+    // fresh: remaining=10h → raw=9500/10=950
+    // half : remaining=5h  → raw=9500/5 =1900
+    expect(slowPlanFresh.netDelta).toBe(950);
+    expect(slowPlanHalf.netDelta).toBe(1_900);
   });
 });
 

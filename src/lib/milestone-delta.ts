@@ -55,18 +55,26 @@ export function computeMilestoneTarget(
   return { target, trendSign, latest, prev };
 }
 
-// 규칙 3 — 다음 마일스톤까지 예상 도달 시간(시간 단위).
-//   최근 maxIntervals개의 인접 마일스톤 간격(시간)에 순서별 선형 weight를 준
-//   가중 평균. 가장 최근 간격 weight = k, 그 다음 = k−1, ..., 가장 옛것 = 1.
-//   (k = 사용한 간격 수) → Σ(간격×weight) / Σ(weight).
+// 규칙 3 — 지금 시점부터 "다음 마일스톤 예상 도착 시각"까지 남은 시간(시간 단위).
 //
-//   날짜 무관, 순서만 사용. 가속/감속이 weight에 자연스럽게 녹는다 (별도 ×1.1/×0.9
-//   보정 없음). 부호 신호는 규칙 4가 처리하므로 여기선 간격의 크기만 본다.
+//   1) 최근 maxIntervals개의 인접 마일스톤 간격(시간)에 순서별 선형 weight를 준
+//      가중 평균으로 평균 간격(expectedInterval)을 얻는다.
+//      weight: 가장 최근 간격 = k, 그 다음 = k−1, ..., 가장 옛것 = 1.
+//   2) 예상 도착 시각 = 마지막 마일스톤 시각 + expectedInterval.
+//   3) 남은 시간 = 예상 도착 시각 − now.
+//
+//   이미 예상 도착 시각을 지나친(overdue) 채널은 양수 epsilon으로 클램프.
+//   호출 측(planTargetCycle)이 raw = full × cycleHours / remaining 을 계산하고
+//   |raw| >= |full|이면 full로 다시 클램프하므로, 결과적으로 한 사이클에 gap을
+//   다 닫는 동작이 된다.
+//
+//   날짜 무관 평균 자체는 그대로(가속/감속이 weight에 녹음). 부호 신호는 규칙 4가
+//   처리하므로 여기선 간격 크기만 본다.
 //
 // 간격이 1개 미만(마일스톤 < 2개)이면 null — 호출 측에서 fixed 채널로 빠진다.
 export function computePredictedHoursToNextMilestone(
   rows: MilestoneRow[],
-  opts: { maxIntervals: number },
+  opts: { maxIntervals: number; now: Date },
 ): number | null {
   if (rows.length < 2) return null;
 
@@ -93,7 +101,14 @@ export function computePredictedHoursToNextMilestone(
   }
   if (weightTotal === 0) return null;
 
-  const hours = weightedSum / weightTotal;
-  // 간격이 음수일 리 없지만(시간순 정렬), 0 이하 방어.
-  return hours > 0 ? hours : null;
+  const expectedIntervalHours = weightedSum / weightTotal;
+  if (!(expectedIntervalHours > 0)) return null;
+
+  const latestAt = new Date(rows[rows.length - 1]!.polled_at).getTime();
+  const elapsedHours = (opts.now.getTime() - latestAt) / MS_PER_HOUR;
+  const remainingHours = expectedIntervalHours - elapsedHours;
+
+  // overdue: 예상 도착 시각을 지나친 채널은 epsilon(0.001h)으로 클램프 →
+  // planTargetCycle의 full 클램프가 작동해 사이클 안에 gap을 다 닫는다.
+  return Math.max(0.001, remainingHours);
 }
