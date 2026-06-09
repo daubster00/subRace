@@ -126,17 +126,23 @@ describe('planTargetCycle', () => {
     expect(plan.events.every((e) => Math.abs(e.magnitude) <= 20)).toBe(true);
   });
 
-  it('target-bounce: 추세 0(정체) → net 0 진동, ±3% bucket unit', () => {
+  it('target-bounce: 추세 0(정체) → 진폭 ±300 범위 안에서 ±10 jitter 랜덤 워크', () => {
     const flat = Array(6).fill(5_000_000);
     const ms = milestones([0, 1, 2, 3, 4, 5], flat);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(4));
     expect(plan.phase).toBe('target-bounce');
     expect(plan.netDelta).toBe(0);
-    expect(sum(plan.events)).toBe(0);
-    // unit(5M → 10,000) × 0.03 = 300
-    expect(plan.events.some((e) => e.magnitude === 300)).toBe(true);
-    expect(plan.events.some((e) => e.magnitude === -300)).toBe(true);
+    // 한 이벤트 magnitude ≤ 10
+    for (const e of plan.events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(10);
+    // 누적 위치(target에서의 편차)가 ±amp(=300) 안에
+    let pos = 0;
+    let maxAbs = 0;
+    for (const e of plan.events) {
+      pos += e.magnitude;
+      maxAbs = Math.max(maxAbs, Math.abs(pos));
+    }
+    expect(maxAbs).toBeLessThanOrEqual(300);
   });
 
   it('하락 추세 normal: netDelta 음수, 이벤트 합 일치', () => {
@@ -179,8 +185,10 @@ describe('planTargetCycle', () => {
     const plan = planTargetCycle(api, api + 39, ms, cfg, nowAtLatest(ms), lcg(99));
     expect(plan.phase).toBe('target-bounce');
     expect(plan.display).toBe(api + 39); // 떠 있는 display 그대로
-    expect(plan.netDelta).toBe(0);       // 음수 깎기 없음
-    expect(sum(plan.events)).toBe(0);
+    expect(plan.netDelta).toBe(0);       // CyclePlan에 기록되는 의도 net (드리프트는 별도)
+    // 이벤트 합은 정확히 0이 아닐 수 있음(랜덤 워크 드리프트) — 단 amp 안.
+    // api=5M → bucket unit 10k × bounceStepRatio 0.01 = amp 100.
+    expect(Math.abs(sum(plan.events))).toBeLessThanOrEqual(100);
   });
 
   // 회귀 검증 (2026-06-09): 사용자 피드백 #3.
@@ -218,23 +226,23 @@ describe('planTargetCycle', () => {
     expect(slowPlanHalf.netDelta).toBe(1_900);
   });
 
-  // 4.2초 간격 제약(2026-06-09 customer feedback): 큰 absNet은 슬롯 용량으로
+  // 5.5초 간격 제약(2026-06-09 customer feedback): 큰 absNet은 슬롯 용량으로
   // 축소되어 한 사이클에 전부 닫지 않고 다음 사이클로 넘긴다.
-  it('1h 사이클 × 4.2s 간격 = 슬롯 857개 → netDelta 8,570(=857×maxMag) 이하로 축소', () => {
+  it('1h 사이클 × 5.5s 간격 = 슬롯 654개 → netDelta 6,540(=654×maxMag) 이하로 축소', () => {
     // expectedInterval=1h, full=9500. overdue 없이도 fresh에서 raw=9500.
-    // 4.2초 간격 제약으로 슬롯 857개 캡 → 추세 슬롯×maxMag(=10)으로 absNet 축소.
+    // 5.5초 간격 제약으로 슬롯 654개 캡 → 추세 슬롯×maxMag(=10)으로 absNet 축소.
     const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(17));
     expect(Math.abs(plan.netDelta)).toBeLessThan(9_500); // 축소됨
-    expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(857 * cfg.normalMaxMagnitude);
+    expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(654 * cfg.normalMaxMagnitude);
     // 이벤트 합과 일치
     const sum = plan.events.reduce((s, e) => s + e.magnitude, 0);
     expect(plan.netDelta).toBe(sum);
-    // 인접 간격 ≥ 4200ms
+    // 인접 간격 ≥ 5500ms
     for (let i = 1; i < plan.events.length; i++) {
-      expect(plan.events[i]!.offsetMs - plan.events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(4_200);
+      expect(plan.events[i]!.offsetMs - plan.events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(5_500);
     }
   });
 });

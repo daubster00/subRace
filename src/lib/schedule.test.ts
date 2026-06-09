@@ -105,10 +105,10 @@ describe('buildCycleEvents', () => {
     expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(800);
   });
 
-  // 2026-06-09 customer feedback: 인접 이벤트 간격 ≥ 4.2초 보장.
-  // 모션 시간보다 짧은 간격으로 이벤트가 박히면 테두리 모션이 안 보이고
-  // 숫자만 폭주하는 ISSEI 증상.
-  it('이벤트 수 상한: 사이클 / 4.2s = 857개 — 큰 netDelta는 absNet 축소', () => {
+  // 2026-06-09 customer feedback: 인접 이벤트 간격 ≥ 5.5초 보장
+  // (모션 4.2초 + 휴식 ~1.3초). 모션이 한 번씩 끊겨야 테두리가 인식됨.
+  // cycle 3,600,000ms / 5,500ms = 654 슬롯 상한.
+  it('이벤트 수 상한: cycle / MIN_INTERVAL_MS = 654개 — 큰 netDelta는 absNet 축소', () => {
     const rng = lcg(42);
     const events = buildCycleEvents({
       cycleMs: CYCLE,
@@ -119,16 +119,13 @@ describe('buildCycleEvents', () => {
       jitterRatio: 0.5,
       rng,
     });
-    // 슬롯 수가 상한에 클램프
-    expect(events.length).toBeLessThanOrEqual(857);
-    // 인접 간격이 4.2초(=4200ms) 이상
+    expect(events.length).toBeLessThanOrEqual(654);
     for (let i = 1; i < events.length; i++) {
-      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(4_200);
+      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(5_500);
     }
-    // 슬롯 용량(857 × 10 = 8570)에 한참 못 미치는 50,000은 축소됨
     const delivered = events.reduce((a, e) => a + e.magnitude, 0);
     expect(Math.abs(delivered)).toBeLessThan(50_000);
-    expect(Math.abs(delivered)).toBeLessThanOrEqual(857 * 10);
+    expect(Math.abs(delivered)).toBeLessThanOrEqual(654 * 10);
   });
 
   it('이벤트 수 상한: 음수 netDelta도 동일하게 축소', () => {
@@ -142,16 +139,16 @@ describe('buildCycleEvents', () => {
       jitterRatio: 0.5,
       rng,
     });
-    expect(events.length).toBeLessThanOrEqual(857);
+    expect(events.length).toBeLessThanOrEqual(654);
     for (let i = 1; i < events.length; i++) {
-      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(4_200);
+      expect(events[i]!.offsetMs - events[i - 1]!.offsetMs).toBeGreaterThanOrEqual(5_500);
     }
     const delivered = events.reduce((a, e) => a + e.magnitude, 0);
     expect(delivered).toBeLessThan(0);
     expect(Math.abs(delivered)).toBeLessThan(50_000);
   });
 
-  it('상한 미달은 기존 동작 유지: net 1000 → 합 일치, 슬롯 < 857', () => {
+  it('상한 미달은 기존 동작 유지: net 1000 → 합 일치, 슬롯 < 654', () => {
     const rng = lcg(44);
     const events = buildCycleEvents({
       cycleMs: CYCLE,
@@ -162,7 +159,7 @@ describe('buildCycleEvents', () => {
       jitterRatio: 0.5,
       rng,
     });
-    expect(events.length).toBeLessThan(857);
+    expect(events.length).toBeLessThan(654);
     expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(1_000);
   });
 });
@@ -249,19 +246,45 @@ describe('buildCatchUpEvents', () => {
 });
 
 describe('buildBounceEvents', () => {
-  it('Σ magnitude === 0 (net 0 진동)', () => {
-    for (const count of [6, 7, 8, 11]) {
-      const rng = lcg(count);
-      const events = buildBounceEvents({ amplitude: 300, count, cycleMs: CYCLE, jitterRatio: 0.5, rng });
-      expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(0);
+  // 2026-06-09 customer feedback: 한 이벤트는 ±10 안쪽, 누적 위치는 ±amp 안쪽.
+  it('한 이벤트 magnitude ≤ 10 (BOUNCE_PER_EVENT_MAGNITUDE)', () => {
+    for (const amp of [100, 1000, 10_000]) {
+      const rng = lcg(amp);
+      const events = buildBounceEvents({ amplitude: amp, count: 60, cycleMs: CYCLE, jitterRatio: 0.5, rng });
+      for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(10);
     }
   });
 
-  it('amplitude 폭 사용, count 이상', () => {
+  it('누적 위치(running sum)가 ±amp 안에 머무름', () => {
+    for (const amp of [100, 1000, 10_000]) {
+      const rng = lcg(amp + 999);
+      const events = buildBounceEvents({ amplitude: amp, count: 100, cycleMs: CYCLE, jitterRatio: 0.5, rng });
+      let pos = 0;
+      let maxAbs = 0;
+      // 시간순 정렬된 events를 순서대로 적용한 누적 위치 추적.
+      // assignTimes가 sort by offsetMs 하지만 jitter가 작아 magnitudes 입력 순서와
+      // 거의 동일 — 그래도 시간순으로 누적 검증.
+      for (const e of events) {
+        pos += e.magnitude;
+        maxAbs = Math.max(maxAbs, Math.abs(pos));
+      }
+      expect(maxAbs).toBeLessThanOrEqual(amp);
+    }
+  });
+
+  it('count 이상의 이벤트', () => {
     const rng = lcg(3);
     const events = buildBounceEvents({ amplitude: 300, count: 6, cycleMs: CYCLE, jitterRatio: 0.5, rng });
     expect(events.length).toBeGreaterThanOrEqual(6);
-    expect(events.some((e) => e.magnitude === 300)).toBe(true);
-    expect(events.some((e) => e.magnitude === -300)).toBe(true);
+  });
+
+  it('큰 amp + 충분한 count → ±10 범위에서 다양한 값 발생', () => {
+    const rng = lcg(42);
+    const events = buildBounceEvents({ amplitude: 1_000, count: 100, cycleMs: CYCLE, jitterRatio: 0.5, rng });
+    const unique = new Set(events.map((e) => e.magnitude));
+    expect(unique.size).toBeGreaterThan(5); // 무작위 분포 검증
+    // ±10 영역에서 양/음 모두 등장
+    expect(events.some((e) => e.magnitude > 0)).toBe(true);
+    expect(events.some((e) => e.magnitude < 0)).toBe(true);
   });
 });

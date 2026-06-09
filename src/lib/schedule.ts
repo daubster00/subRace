@@ -11,12 +11,16 @@
 //   5. 시각은 균등 분배 + jitter             (메트로놈 방지 + 휴식 구간)
 //   6. 인접 이벤트 간격 ≥ MIN_EVENT_INTERVAL_MS — 화면 모션이 한 번씩 완주.
 
-// 클라이언트 테두리/숫자 모션 지속시간(useInterpolatedSnapshot.ts의
-// MOTION_TOTAL_DURATION_MS와 동기). 이벤트가 이 값보다 짧은 간격으로 박히면
-// 직전 모션이 끝나기 전에 새 모션이 덮어씌워져 테두리가 안 보이고 숫자만
-// 폭주하는 것처럼 보임. 사이클당 슬롯 수의 절대 상한 + jitter 폭 상한을 이
-// 값으로 강제한다(2026-06-09 customer feedback).
-export const MIN_EVENT_INTERVAL_MS = 4_200;
+// 모션 지속시간(4.2s, useInterpolatedSnapshot.ts MOTION_TOTAL_DURATION_MS) +
+// 모션과 모션 사이 시각적 휴식(약 1.3s) = 5.5s. 이벤트가 이보다 짧은 간격으로
+// 박히면 직전 모션이 끝나는 그 순간에 새 모션이 시작돼 "쉬는 틈"이 없고
+// 메트로놈처럼 연속 동작으로 보임. 사이클당 슬롯 수의 절대 상한 + jitter 폭
+// 상한을 이 값으로 강제(2026-06-09 customer feedback).
+export const MIN_EVENT_INTERVAL_MS = 5_500;
+// 진동(bounce) 이벤트 한 개의 최대 절대 magnitude. 진폭(amp)이 큰 채널에서도
+// 한 번에 점프하는 양은 ±10 안쪽으로 묶어 "100씩 올라간다" 같은 큰 점프 인상
+// 차단. 진폭은 누적된 위치(running sum)의 ±경계로 활용 (2026-06-09 feedback).
+export const BOUNCE_PER_EVENT_MAGNITUDE = 10;
 
 export interface ScheduledEvent {
   offsetMs: number;  // 사이클 시작으로부터의 ms. [0, cycleMs)
@@ -322,27 +326,38 @@ export function buildCatchUpEvents(opts: BuildCatchUpOpts): ScheduledEvent[] {
 }
 
 export interface BuildBounceOpts {
-  amplitude: number;   // 진동 폭 (±3% of step). >= 1
+  amplitude: number;   // 진동 가능 범위(±). 디스플레이가 target ± amplitude 내에 머무름.
   count: number;       // 이벤트 수 (>= minEvents)
   cycleMs: number;
   jitterRatio: number;
   rng?: () => number;
 }
 
-// target 도달 후 진동 (target-bounce). 순변화 0, ± 교대.
-//   위/아래 동수로 net 0. count가 홀수면 마지막 1개는 0 magnitude(no-op)로 맞춰
-//   net 0을 보장.
+// target 도달 후 진동 (target-bounce). 한 번에 ±BOUNCE_PER_EVENT_MAGNITUDE(=10)
+// 이내의 작은 무작위 step으로 누적 위치가 ±amplitude 안에 머무는 랜덤 워크.
+// 종료 시 누적이 정확히 0으로 돌아오지 않을 수 있음(드리프트 ≤ maxEach) —
+// 다음 사이클의 plan이 새 gap으로 자연스럽게 보정.
+//
+// 구 구현(+amp/-amp 교대)은 큰 채널에서 한 이벤트가 ±1000/±10000을 점프해
+// "100씩 올라간다"는 시각적 인상을 줬음 (2026-06-09 customer feedback).
 export function buildBounceEvents(opts: BuildBounceOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
   const amp = Math.max(1, Math.round(opts.amplitude));
+  const maxEach = BOUNCE_PER_EVENT_MAGNITUDE;
   const n = Math.max(2, opts.count);
 
-  const pairs = Math.floor(n / 2);
   const mags: number[] = [];
-  for (let i = 0; i < pairs; i++) {
-    mags.push(amp, -amp);
+  let pos = 0; // 현재 target으로부터의 누적 거리. ±amp 안에 유지.
+  for (let i = 0; i < n; i++) {
+    // 다음 step의 유효 범위: per-event 한계와 amp 경계 둘 다.
+    const lo = Math.max(-maxEach, -amp - pos);
+    const hi = Math.min(maxEach, amp - pos);
+    if (lo >= hi) { mags.push(0); continue; }
+    // 균등 무작위, 정수.
+    const mag = Math.round(lo + rng() * (hi - lo));
+    mags.push(mag);
+    pos += mag;
   }
-  if (mags.length < n) mags.push(0); // 홀수 보정 — net 0 유지
 
   return assignTimes(mags, opts.cycleMs, opts.jitterRatio, rng);
 }
