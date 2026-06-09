@@ -182,11 +182,12 @@ export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   let absNet = Math.abs(opts.netDelta);
   if (absNet === 0) return [];
 
-  // 1. 사이클당 최대 슬롯 수 (휴식 시간 포함). 한 슬롯 평균 비용:
-  //    MIN_EVENT_INTERVAL_MS + (휴식 비율 × 휴식 평균 시간).
-  const restAvgMs = (NORMAL_REST_MIN_MS + NORMAL_REST_MAX_MS) / 2;
-  const effectivePerSlotMs = MIN_EVENT_INTERVAL_MS + NORMAL_REST_RATIO * restAvgMs;
-  const Nmax = Math.floor(cycleMs / effectivePerSlotMs);
+  // 1. 사이클당 최대 슬롯 수. 한 슬롯 비용은 휴식 최댓값으로 잡고, cycleMs에서
+  //    한 슬롯 여유(MIN_EVENT_INTERVAL_MS)를 빼서 wrap 경계 gap도 ≥ MIN 보장.
+  //    여유 없이 잡으면 cursor 총합이 cycleMs에 근접해 wrap된 마지막 슬롯과
+  //    비-wrap된 첫 슬롯 사이가 MIN 미만이 될 수 있음.
+  const effectivePerSlotMs = MIN_EVENT_INTERVAL_MS + NORMAL_REST_RATIO * NORMAL_REST_MAX_MS;
+  const Nmax = Math.floor((cycleMs - MIN_EVENT_INTERVAL_MS) / effectivePerSlotMs);
 
   // 2. 사이클에 들어갈 수 있는 absNet 상한.
   //    추세 슬롯 = Nmax × (1 − counterRatio), 평균 magnitude = maxMag × 0.7 (다양화).
