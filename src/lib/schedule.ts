@@ -31,6 +31,19 @@ function defaultRng(): number {
   return Math.random();
 }
 
+// Normal phase 자연스러움 파라미터 (2026-06-09 customer feedback).
+//   COUNTER_RATIO : 감소 이벤트 비율 (고정). 큰 absNet에서도 일정 비율 유지.
+//   COUNTER_MAG   : 감소 한 번당 magnitude. "내려가는 것처럼만 보이게" 1.
+//   REST_RATIO    : 휴식 슬롯 비율. 각 슬롯에 0.5~2초 추가 지연.
+//   DIVERSIFY_RATIO: 추세 평균 magnitude / maxMag 비율. 0.7 → magnitude가
+//                   maxMag에 클램프되지 않고 1~maxMag 범위에 분산.
+const NORMAL_COUNTER_RATIO = 0.10;
+const NORMAL_COUNTER_MAG   = 1;
+const NORMAL_REST_RATIO    = 0.10;
+const NORMAL_REST_MIN_MS   = 500;
+const NORMAL_REST_MAX_MS   = 2_000;
+const NORMAL_DIVERSIFY_RATIO = 0.7;
+
 // total을 n개 정수로 분배. 각 ∈ [1, maxEach]. 합 정확히 total.
 //   분포 방식: 평균 avg = total/n 중심으로 ±variance 흔든 뒤 클램프, 잔차는
 //   무작위 슬롯에 ±1로 흡수. distributeInt(균등)보다 자연스러운 다양성을
@@ -85,6 +98,19 @@ function distributeRandom(
     if (eligible.length === 0) break;
     out[eligible[Math.floor(rng() * eligible.length)]!]!--;
     diff++;
+  }
+  return out;
+}
+
+// N개 슬롯 중 K개를 무작위로 선택 (중복 없음). 균등 X — 진짜 랜덤.
+function pickRandomSlots(n: number, k: number, rng: () => number): Set<number> {
+  const out = new Set<number>();
+  if (k <= 0 || n <= 0) return out;
+  const indices = Array.from({ length: n }, (_, i) => i);
+  const pickCount = Math.min(k, n);
+  for (let i = 0; i < pickCount; i++) {
+    const idx = Math.floor(rng() * indices.length);
+    out.add(indices.splice(idx, 1)[0]!);
   }
   return out;
 }
@@ -151,63 +177,91 @@ export interface BuildCycleOpts {
 // 범위에 자연 분포한다(과거: 거의 maxMag로 평탄화).
 export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
-  const { cycleMs, minEvents, maxMagnitude, counterRatio, jitterRatio } = opts;
+  const { cycleMs, minEvents, maxMagnitude } = opts;
   const trendDir = opts.netDelta >= 0 ? 1 : -1;
   let absNet = Math.abs(opts.netDelta);
+  if (absNet === 0) return [];
 
-  // 추세 용량만으로 필요한 최소 이벤트 수.
-  const baseN = Math.max(minEvents, Math.ceil(absNet / maxMagnitude) || 1);
+  // 1. 사이클당 최대 슬롯 수 (휴식 시간 포함). 한 슬롯 평균 비용:
+  //    MIN_EVENT_INTERVAL_MS + (휴식 비율 × 휴식 평균 시간).
+  const restAvgMs = (NORMAL_REST_MIN_MS + NORMAL_REST_MAX_MS) / 2;
+  const effectivePerSlotMs = MIN_EVENT_INTERVAL_MS + NORMAL_REST_RATIO * restAvgMs;
+  const Nmax = Math.floor(cycleMs / effectivePerSlotMs);
 
-  // 반대 방향 이벤트 수 (개수 고정 — 확률 아님).
-  let nCounter = counterRatio > 0 ? Math.round(baseN * counterRatio) : 0;
-
-  // 반대 이벤트 1개당 평균 크기 — 작게. 평균 추세 크기의 절반 수준, 최소 1.
-  const counterEachAvg =
-    nCounter > 0
-      ? Math.min(maxMagnitude, Math.max(1, Math.round(absNet / baseN / 2)))
-      : 0;
-  let totalCounter = nCounter * counterEachAvg;
-
-  // 추세 이벤트가 채워야 할 총량 = 순변화 + 반대분 상쇄.
-  let requiredTrend = absNet + totalCounter;
-  // 다양화 항: 평균 magnitude를 maxMag * 0.7로 캡 → slot 수가 자동 확장.
-  const nTrendDiverse = Math.ceil(requiredTrend / (maxMagnitude * 0.7)) || 1;
-  let nTrend = Math.max(
-    baseN - nCounter,
-    Math.ceil(requiredTrend / maxMagnitude) || 1,
-    nTrendDiverse,
-    1,
+  // 2. 사이클에 들어갈 수 있는 absNet 상한.
+  //    추세 슬롯 = Nmax × (1 − counterRatio), 평균 magnitude = maxMag × 0.7 (다양화).
+  //    감소 슬롯이 absNet에서 차감하는 양 = nCounter × COUNTER_MAG.
+  const trendShare = 1 - NORMAL_COUNTER_RATIO;
+  const maxAbsNet = Math.max(
+    0,
+    Math.floor(
+      Nmax * trendShare * maxMagnitude * NORMAL_DIVERSIFY_RATIO -
+      Nmax * NORMAL_COUNTER_RATIO * NORMAL_COUNTER_MAG,
+    ),
   );
+  if (absNet > maxAbsNet) absNet = maxAbsNet;
+  if (absNet === 0) return [];
 
-  // 4.2초 간격 제약: 슬롯이 사이클 / MIN_INTERVAL_MS를 넘으면 캡.
-  // 캡되면 추세/반대 슬롯을 비율 그대로 축소하고 absNet도 슬롯 용량(추세
-  // 슬롯 × maxMag − totalCounter)에 맞춰 줄인다. 모자라는 양은 다음 사이클이
-  // 자동으로 닫는다 — display_state.target은 그대로라 다음 plan이 gap만큼
-  // 새 absNet을 다시 계산.
-  const maxEventsBySpacing = Math.floor(cycleMs / MIN_EVENT_INTERVAL_MS);
-  if (nTrend + nCounter > maxEventsBySpacing) {
-    const totalN = nTrend + nCounter;
-    nCounter = Math.floor(nCounter * (maxEventsBySpacing / totalN));
-    nTrend = Math.max(1, maxEventsBySpacing - nCounter);
-    totalCounter = nCounter * counterEachAvg;
-    const cappedRequiredTrend = nTrend * maxMagnitude;
-    requiredTrend = Math.min(requiredTrend, cappedRequiredTrend);
-    absNet = Math.max(0, requiredTrend - totalCounter);
+  // 3. T(추세), C(감소) 결정. catch-up과 동일한 반복 풀이 — counter 비율이
+  //    고정이라 T가 변하면 C가 따라오고, 다시 T가 trendTotal 충족·다양화 요건을
+  //    만족하도록 보정. 3회면 안정.
+  const cFactor = NORMAL_COUNTER_RATIO / trendShare;
+  let T = Math.max(
+    minEvents,
+    1,
+    Math.ceil(absNet / (maxMagnitude * NORMAL_DIVERSIFY_RATIO)),
+  );
+  let C = 0;
+  for (let iter = 0; iter < 3; iter++) {
+    C = Math.floor(T * cFactor);
+    const trendTotal = absNet + C * NORMAL_COUNTER_MAG;
+    T = Math.max(
+      minEvents,                                                       // 활동성 floor
+      Math.ceil(trendTotal / maxMagnitude),                            // 합 충족 최소
+      Math.ceil(trendTotal / (maxMagnitude * NORMAL_DIVERSIFY_RATIO)), // 다양화
+    );
   }
 
-  if (absNet === 0 && requiredTrend === 0) return [];
-
-  const trendMags = shuffle(distributeRandom(requiredTrend, nTrend, maxMagnitude, rng), rng)
+  // 4. 매그니튜드 생성.
+  const trendTotal = absNet + C * NORMAL_COUNTER_MAG;
+  const trendMags = shuffle(distributeRandom(trendTotal, T, maxMagnitude, rng), rng)
     .map((m) => trendDir * m);
-  const counterMags: number[] =
-    nCounter > 0
-      ? distributeRandom(totalCounter, nCounter, maxMagnitude, rng).map((m) => -trendDir * m)
-      : [];
 
-  // 반대 이벤트를 슬롯에 고르게 끼워넣기 (한 군데 몰리지 않게).
-  const merged = interleave(trendMags, counterMags);
+  // 5. 감소 슬롯 위치 — 무작위 분포 (user 요청). 추세는 나머지 자리를 채움.
+  const N = T + C;
+  const counterPositions = pickRandomSlots(N, C, rng);
+  const merged: number[] = new Array(N);
+  let ti = 0;
+  for (let i = 0; i < N; i++) {
+    if (counterPositions.has(i)) {
+      merged[i] = -trendDir * NORMAL_COUNTER_MAG;
+    } else {
+      merged[i] = trendMags[ti++]!;
+    }
+  }
 
-  return assignTimes(merged, cycleMs, jitterRatio, rng);
+  // 6. 휴식 슬롯 위치 — 무작위 분포. 각 슬롯에 0.5~2초 추가 지연.
+  const R = Math.floor(N * NORMAL_REST_RATIO);
+  const restSlots = pickRandomSlots(N, R, rng);
+  const restSpan = NORMAL_REST_MAX_MS - NORMAL_REST_MIN_MS + 1;
+
+  // 7. 채널별 phase shift — 같은 N이 캡된 채널들이 동시 발화하지 않게.
+  //    cursor 기반이라 cycleMs 모듈로 wrap이 인접 슬롯 간격(= MIN_EVENT_INTERVAL_MS)을
+  //    보존한다.
+  const phaseShift = Math.round(rng() * cycleMs);
+
+  const events: ScheduledEvent[] = [];
+  let cursor = 0;
+  for (let i = 0; i < N; i++) {
+    if (restSlots.has(i)) {
+      cursor += NORMAL_REST_MIN_MS + Math.floor(rng() * restSpan);
+    }
+    const t = (((cursor + phaseShift) % cycleMs) + cycleMs) % cycleMs;
+    events.push({ offsetMs: t, magnitude: merged[i]! });
+    cursor += MIN_EVENT_INTERVAL_MS;
+  }
+  events.sort((a, b) => a.offsetMs - b.offsetMs);
+  return events;
 }
 
 // trend 다수 + counter 소수를, counter가 균등 간격으로 박히도록 병합.

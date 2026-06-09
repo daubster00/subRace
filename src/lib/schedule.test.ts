@@ -49,15 +49,12 @@ describe('buildCycleEvents', () => {
     expect(events.length).toBeGreaterThanOrEqual(6);
   });
 
-  it('catch-up: 모든 이벤트가 같은 방향 (반대 0개)', () => {
-    const rng = lcg(9);
-    const events = buildCycleEvents({ ...base, netDelta: 300, counterRatio: 0, rng });
-    expect(events.every((e) => e.magnitude > 0)).toBe(true);
-  });
-
-  it('normal 상승: 반대(감소) 이벤트가 일부 섞인다', () => {
+  // 2026-06-09: buildCycleEvents는 normal phase 전용으로 항상 ~10% 감소 슬롯
+  // (NORMAL_COUNTER_RATIO). 호출 측의 counterRatio 인자는 무시됨. catch-up은
+  // buildCatchUpEvents가 담당.
+  it('normal 상승: counterRatio 인자와 무관하게 항상 감소 일부 섞임', () => {
     const rng = lcg(123);
-    const events = buildCycleEvents({ ...base, netDelta: 400, counterRatio: 0.2, rng });
+    const events = buildCycleEvents({ ...base, netDelta: 400, counterRatio: 0, rng });
     expect(events.some((e) => e.magnitude < 0)).toBe(true);
     expect(events.some((e) => e.magnitude > 0)).toBe(true);
   });

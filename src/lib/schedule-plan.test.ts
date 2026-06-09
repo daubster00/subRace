@@ -157,20 +157,21 @@ describe('planTargetCycle', () => {
     expect(sum(plan.events)).toBe(plan.netDelta);
   });
 
-  // 활동성 곡선(2026-06-08): 하위 채널 정체 해소 검증.
-  it('하위 채널(작은 absNet) → 이벤트 수 N_MAX 근처 + 감소 비율 ↑', () => {
-    // step=10, 1시간 간격 → target=5_000_000+0.95×10=5_000_010(round 9), netDelta ≈ 9~10
+  // 활동성 곡선(2026-06-08, 2026-06-09 갱신): 하위 채널은 N_MAX 근처 이벤트 +
+  // NORMAL_COUNTER_RATIO(10%) 감소.
+  it('하위 채널(작은 absNet) → 이벤트 수 minEvents 근처 + 감소 ~10%', () => {
     const counts = [4_999_950, 4_999_960, 4_999_970, 4_999_980, 4_999_990, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(11));
     expect(plan.phase).toBe('normal');
     expect(Math.abs(plan.netDelta)).toBeLessThanOrEqual(15);
-    // N_MAX=100, absNet≈10 → N≈89. 50개 이상은 보장.
+    // N_MAX=100 → minEvents=89. T≥89, C≈9 → 총 N≈98 이상.
     expect(plan.events.length).toBeGreaterThan(60);
     const negCount = plan.events.filter((e) => e.magnitude < 0).length;
-    // counter slot 비율 ~0.49 → 감소 이벤트 40% 이상
-    expect(negCount / plan.events.length).toBeGreaterThan(0.4);
+    // NORMAL_COUNTER_RATIO 10% 근방. 작은 absNet에서 변동 폭 고려해 5~25% 허용.
+    expect(negCount / plan.events.length).toBeGreaterThan(0.05);
+    expect(negCount / plan.events.length).toBeLessThan(0.25);
   });
 
   // 회귀 검증 (2026-06-08): 사용자 피드백 #2.
