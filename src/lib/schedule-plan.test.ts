@@ -148,20 +148,39 @@ describe('planTargetCycle', () => {
     expect(plan.events.length).toBe(cfg.bounceCount); // 100
   });
 
-  it('하락 추세 normal: netDelta 음수, 모든 magnitude는 ±1~5 범위 (적응 분배)', () => {
+  // 2026-06-10 새 정책: 하락 추세는 다음 감소 마일스톤을 예측하지 않는다.
+  // target = latest + amplitude(1% bucket) 단방향. display가 [latest, latest+amp]
+  // 안이면 단방향 bounce, 아니면 normal로 그쪽으로 이동.
+  it('하락 추세 + display=latest → target-bounce 단방향(latest 아래 금지)', () => {
     const counts = [5_000_500, 5_000_400, 5_000_300, 5_000_200, 5_000_100, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(5));
-    expect(plan.phase).toBe('normal');
-    expect(plan.target).toBe(4_999_905);
-    expect(plan.netDelta).toBeLessThan(0);
-    expect(sum(plan.events)).toBe(plan.netDelta);
-    // CF-10: 적응 분배 magnitude는 ±1~5 균등 랜덤
+    expect(plan.phase).toBe('target-bounce');
+    expect(plan.target).toBe(5_000_300); // latest(5,000,000) + amp(300)
+    expect(plan.netDelta).toBe(0);
+    // display는 latest=5,000,000 아래로 못 내려간다 (누적 pos ≥ 0).
+    let pos = 0;
+    let minPos = 0;
+    let maxPos = 0;
     for (const e of plan.events) {
-      expect(Math.abs(e.magnitude)).toBeGreaterThanOrEqual(1);
-      expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(5);
+      pos += e.magnitude;
+      minPos = Math.min(minPos, pos);
+      maxPos = Math.max(maxPos, pos);
     }
+    expect(minPos).toBeGreaterThanOrEqual(0);
+    expect(maxPos).toBeLessThanOrEqual(300);
+  });
+
+  it('하락 추세 + display < latest → normal phase, effectiveTarget(latest+amp)로 위로', () => {
+    const counts = [5_000_500, 5_000_400, 5_000_300, 5_000_200, 5_000_100, 5_000_000];
+    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
+    const api = 5_000_000;
+    const plan = planTargetCycle(api, api - 800, ms, cfg, nowAtLatest(ms), lcg(5));
+    expect(plan.phase).toBe('normal');
+    expect(plan.target).toBe(5_000_300);
+    expect(plan.netDelta).toBeGreaterThan(0); // 위로 이동
+    expect(sum(plan.events)).toBe(plan.netDelta);
   });
 
   // CF-8 (2026-06-09): 회귀 검증. display > api여도 catch-up으로 깎지 않음.

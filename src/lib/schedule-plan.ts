@@ -99,6 +99,44 @@ export function planTargetCycle(
     maxIntervals: cfg.trendMaxIntervals,
     epsilon: cfg.trendEpsilon,
   })!;
+
+  // 감소 채널 정책(2026-06-10): 다음 감소 마일스톤을 예측하지 않는다. target은
+  // 마지막 마일스톤(latest) + amplitude(bucket unit × bounceStepRatio)로 고정,
+  // 진동 범위는 [latest, latest+amp] 단방향 — display는 latest 아래로 못 내려간다.
+  // display가 그 범위 밖이면 normal phase로 진입하되 effectiveTarget로 향한다.
+  if (targetInfo.trendSign === -1) {
+    const bucketUnit = getApiBucket(api).unit;
+    const amplitude = Math.max(1, Math.round(cfg.bounceStepRatio * bucketUnit));
+    const floor = targetInfo.latest;
+    const effectiveTarget = floor + amplitude;
+    const offset = display - floor;
+
+    if (offset >= 0 && offset <= amplitude) {
+      const events = buildBounceEvents({
+        amplitude,
+        count: cfg.bounceCount,
+        cycleMs: cfg.cycleMs,
+        jitterRatio: cfg.jitterRatio,
+        rng,
+        posCap: amplitude,
+        negCap: 0,
+        startPos: offset,
+      });
+      return { phase: 'target-bounce', display, target: effectiveTarget, netDelta: 0, events };
+    }
+
+    const full = effectiveTarget - display;
+    const events = buildCycleEvents({
+      netDelta: full,
+      cycleMs: cfg.cycleMs,
+      maxMagnitude: cfg.normalMaxMagnitude,
+      jitterRatio: cfg.jitterRatio,
+      rng,
+    });
+    const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
+    return { phase: 'normal', display, target: effectiveTarget, netDelta: actualNetDelta, events };
+  }
+
   const target = targetInfo.target;
 
   const predictedHours = computePredictedHoursToNextMilestone(milestones, {

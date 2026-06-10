@@ -158,13 +158,18 @@ function assignTimes(
   cycleMs: number,
   jitterRatio: number,
   rng: () => number,
+  opts: { phaseShift?: boolean } = {},
 ): ScheduledEvent[] {
   const n = magnitudes.length;
   const slot = cycleMs / n;
   const safeJitterMax = Math.max(0, (slot - MIN_EVENT_INTERVAL_MS) / 2);
   const rawJitterMax = (jitterRatio * slot) / 2;
   const jitterMax = Math.min(rawJitterMax, safeJitterMax);
-  const phaseShift = rng() * cycleMs;
+  // phaseShift는 채널 간 동시 발화 desync용 — events를 cyclic shift하여 정렬 후
+  // 순서가 회전됨. 단방향 bounce(감소 채널)는 이 회전이 누적 위치를 [0, posCap]
+  // 밖으로 끌어내릴 수 있어 호출자가 false로 끌 수 있다.
+  const usePhaseShift = opts.phaseShift !== false;
+  const phaseShift = usePhaseShift ? rng() * cycleMs : 0;
   const events: ScheduledEvent[] = magnitudes.map((magnitude, i) => {
     const jitter = (rng() - 0.5) * 2 * jitterMax;
     const raw = i * slot + slot / 2 + jitter + phaseShift;
@@ -389,25 +394,32 @@ export interface BuildBounceOpts {
   cycleMs: number;
   jitterRatio: number;
   rng?: () => number;
+  // 비대칭 진동(2026-06-10): pos가 [-negCap, +posCap] 안에 머문다. 둘 다 미지정이면
+  // posCap=negCap=amplitude로 양방향 동작(기존 호출자 호환). 감소 채널의 단방향
+  // 진동은 negCap=0 + startPos=0으로 호출해 latest 아래로 못 내려가게 한다.
+  posCap?: number;
+  negCap?: number;
+  startPos?: number;
 }
 
 // target 도달 후 진동 (target-bounce). 각 step의 |mag|=1~5 균등 랜덤이고
-// 부호는 누적 pos가 ±amplitude 안에 머물도록 자동 결정 — 양 부호 다 가능하면
+// 부호는 누적 pos가 [-negCap, +posCap] 안에 머물도록 자동 결정 — 양 부호 다 가능하면
 // 50/50 랜덤, 한쪽만 가능하면 그 쪽 강제. 가능하면 0은 박지 않는다.
 // 종료 시 누적이 정확히 0으로 돌아오지 않을 수 있음 — 다음 사이클의 plan이
 // 새 gap으로 자연스럽게 보정.
 export function buildBounceEvents(opts: BuildBounceOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
   const amp = Math.max(1, Math.round(opts.amplitude));
+  const posCap = Math.max(0, Math.round(opts.posCap ?? amp));
+  const negCap = Math.max(0, Math.round(opts.negCap ?? amp));
   const maxEach = BOUNCE_PER_EVENT_MAGNITUDE;
   const n = Math.max(2, opts.count);
 
   const mags: number[] = [];
-  let pos = 0;
+  let pos = Math.round(opts.startPos ?? 0);
   for (let i = 0; i < n; i++) {
-    // amplitude 양쪽 여유. 1 미만이면 그 방향으로는 어떤 양수 mag도 못 박음.
-    const posRoom = amp - pos;
-    const negRoom = amp + pos;
+    const posRoom = posCap - pos;     // 위로 갈 여유
+    const negRoom = negCap + pos;     // 아래로 갈 여유
     const absMag = 1 + Math.floor(rng() * maxEach); // 1~maxEach
     const posCapped = Math.min(absMag, posRoom);
     const negCapped = Math.min(absMag, negRoom);
@@ -425,5 +437,10 @@ export function buildBounceEvents(opts: BuildBounceOpts): ScheduledEvent[] {
     pos += mag;
   }
 
-  return assignTimes(mags, opts.cycleMs, opts.jitterRatio, rng);
+  // 비대칭(단방향) bounce면 phaseShift 끄기 — 시간순 정렬 시 mags 회전이 일어나
+  // [0, posCap] 안전 구간을 벗어날 수 있음.
+  const asymmetric = posCap !== negCap;
+  return assignTimes(mags, opts.cycleMs, opts.jitterRatio, rng, {
+    phaseShift: !asymmetric,
+  });
 }
