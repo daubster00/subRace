@@ -100,19 +100,21 @@ export function planTargetCycle(
     epsilon: cfg.trendEpsilon,
   })!;
 
-  // 감소·정체 채널 정책(2026-06-10): 다음 마일스톤을 예측하지 않는다. target은
-  // 마지막 마일스톤(latest) + amplitude(bucket unit × bounceStepRatio)로 고정,
-  // 진동 범위는 [latest, latest+amp] 단방향 — display는 latest 아래로 못 내려간다.
-  // display가 그 범위 밖이면 normal phase로 진입하되 effectiveTarget로 향한다.
-  // trendSign=0(정체)도 같은 모양으로 처리해 양방향 진동이 floor를 깨던 문제 차단.
+  // 감소·정체 채널 정책(2026-06-10): 다음 마일스톤을 예측하지 않는다.
+  //   - display ≥ latest: 현재 자리에서 ±amplitude 진동. 단 누적이 latest 밑으로는
+  //     못 가게 negCap 보호. display가 마일스톤보다 한참 위에 떠 있어도 끌어내리지
+  //     않고 거기서 잔잔히 머문다 — "대기하다가 다음 마일스톤이 올라오면 따라간다".
+  //   - display < latest: normal phase로 effectiveTarget(=latest+amp)까지 위로 이동.
+  // 양방향 진동이 floor를 깨던 문제 + 정체 채널을 강제 하락시키던 문제 동시 차단.
   if (targetInfo.trendSign !== 1) {
     const bucketUnit = getApiBucket(api).unit;
     const amplitude = Math.max(1, Math.round(cfg.bounceStepRatio * bucketUnit));
     const floor = targetInfo.latest;
-    const effectiveTarget = floor + amplitude;
     const offset = display - floor;
 
-    if (offset >= 0 && offset <= amplitude) {
+    if (offset >= 0) {
+      // 누적 pos는 [-min(amp, offset), +amp] 범위 = display가 latest 밑으로 못 감.
+      const negCap = Math.min(amplitude, offset);
       const events = buildBounceEvents({
         amplitude,
         count: cfg.bounceCount,
@@ -120,12 +122,14 @@ export function planTargetCycle(
         jitterRatio: cfg.jitterRatio,
         rng,
         posCap: amplitude,
-        negCap: 0,
-        startPos: offset,
+        negCap,
+        startPos: 0,
       });
-      return { phase: 'target-bounce', display, target: effectiveTarget, netDelta: 0, events };
+      return { phase: 'target-bounce', display, target: display, netDelta: 0, events };
     }
 
+    // display < latest: 마일스톤 위쪽(=latest+amp)까지 끌어올림.
+    const effectiveTarget = floor + amplitude;
     const full = effectiveTarget - display;
     const events = buildCycleEvents({
       netDelta: full,

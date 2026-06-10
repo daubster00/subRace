@@ -81,20 +81,24 @@ export async function pollYoutubeChannels(): Promise<void> {
     if (!isQuotaExceeded) {
       // M2: 변경분만 milestone 누적 + poll_state upsert.
       //
-      // - 신규 채널: 마일스톤 INSERT + poll_state 시드 (previous=NULL,
+      // - 신규 채널: milestones INSERT + poll_state 시드 (previous=NULL,
       //   last_api_changed_at=polledAt — 첫 관측 시각을 기준값으로).
-      // - API 값 변동 없음: poll_state.last_polled_at만 갱신.
-      //   subscriber_snapshots는 손대지 않음 → unique index가 막아주기 전에
-      //   상위 레벨에서 차단.
-      // - API 값 변동: 마일스톤 INSERT (source='youtube_api_change') +
+      // - API 값 변동 없음: poll_state.last_polled_at만 갱신. milestones는 안 건드림.
+      // - API 값 변동: milestones에 직전 row와 값 다를 때만 INSERT
+      //   (2026-06-10 통합 정책 — 같은 값 중복은 추세 판정 가중치를 깎음) +
       //   poll_state UPDATE (previous=기존 api, api=새 값, next_milestone 재계산,
       //   last_api_changed_at=polledAt).
       const selectPollState = db.prepare(`
         SELECT api_subscriber_count FROM poll_state WHERE channel_id = ?
       `);
+      const selectLastMilestone = db.prepare(`
+        SELECT subscriber_count FROM milestones
+        WHERE channel_id = ?
+        ORDER BY recorded_at DESC LIMIT 1
+      `);
       const insertMilestone = db.prepare(`
-        INSERT OR IGNORE INTO subscriber_snapshots
-          (channel_id, polled_at, subscriber_count, video_count, view_count, source)
+        INSERT OR IGNORE INTO milestones
+          (channel_id, recorded_at, subscriber_count, video_count, view_count, source)
         VALUES (?, ?, ?, ?, ?, 'youtube_api_change')
       `);
       const insertPollState = db.prepare(`
@@ -140,28 +144,39 @@ export async function pollYoutubeChannels(): Promise<void> {
 
           const existing = selectPollState.get(item.id) as { api_subscriber_count: number } | undefined;
 
+          // 마일스톤 dedup(2026-06-10): 직전 milestones row와 값이 같으면 INSERT
+          // 건너뛴다. YouTube API 라운딩 떨림(예: 75,700↔75,600)이 0 transition을
+          // 만들어 추세 가중치를 깎던 문제 차단. poll_state는 항상 갱신해 화면
+          // fallback이 최신 api 유지.
+          const lastMs = selectLastMilestone.get(item.id) as { subscriber_count: number } | undefined;
+          const shouldInsertMs = !lastMs || lastMs.subscriber_count !== apiCount;
+
           if (!existing) {
             const nextMilestone = getNextMilestone(apiCount);
-            insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
+            if (shouldInsertMs) {
+              insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
+            }
             insertPollState.run(
               item.id, apiCount, nextMilestone,
               polledAt, polledAt, polledAt, polledAt,
             );
             seededCount++;
-            milestoneChannelIds.push(item.id);
+            if (shouldInsertMs) milestoneChannelIds.push(item.id);
           } else if (existing.api_subscriber_count === apiCount) {
             updatePollStateUnchanged.run(polledAt, polledAt, item.id);
             unchangedCount++;
           } else {
             const nextMilestone = getNextMilestone(apiCount);
-            insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
+            if (shouldInsertMs) {
+              insertMilestone.run(item.id, polledAt, apiCount, videoCount, viewCount);
+            }
             updatePollStateChanged.run(
               apiCount, nextMilestone,
               polledAt, polledAt, polledAt,
               item.id,
             );
             changedCount++;
-            milestoneChannelIds.push(item.id);
+            if (shouldInsertMs) milestoneChannelIds.push(item.id);
           }
 
           const thumbnailUrl =

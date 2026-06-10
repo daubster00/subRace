@@ -125,104 +125,100 @@ export function readSnapshot(): SnapshotResponse {
       COALESCE(d.display_subscriber_count, s.subscriber_count, 0) AS subscriber_count,
       (
         SELECT ss_prev.subscriber_count
-        FROM   subscriber_snapshots ss_prev
+        FROM   milestones ss_prev
         WHERE  ss_prev.channel_id = c.id
-          AND  s.polled_at IS NOT NULL
-          AND  ss_prev.polled_at < s.polled_at
-        ORDER  BY ss_prev.polled_at DESC
+          AND  s.recorded_at IS NOT NULL
+          AND  ss_prev.recorded_at < s.recorded_at
+        ORDER  BY ss_prev.recorded_at DESC
         LIMIT  1
       ) AS previous_subscriber_count,
       -- Phase C: 30-day-active 우선, 30일 정체면 60일 baseline.
       --
-      -- 1차) 30일 이상 떨어진 스냅샷 중 현재와 카운트가 다른 가장 최근 행.
+      -- 1차) 30일 이상 떨어진 마일스톤 중 현재와 카운트가 다른 가장 최근 행.
       --      현재가 3.24M인데 35일 전이 3.23M이면 채널은 그동안 transition을
       --      한 번 했고, growthRate는 +10k / 35d 로 정확하게 잡힌다.
       -- 2차) 60일 이상 떨어진 가장 최근 행. 1차가 NULL = 30일 내내 같은 카운트.
-      --      더 멀리 보면 직전 transition을 잡을 수 있다. 이게 사용자가 요구한
-      --      "30일 안에 변화가 없는 채널이 있다면 60일 이전 구독자 수" 분기.
-      -- 3차) 가장 오래된 스냅샷 (60일치 데이터가 아직 없는 신규 채널).
-      --
-      -- 세 분기의 WHERE/ORDER는 _count와 _at subquery가 동일해 같은 행을 선택.
+      -- 3차) 가장 오래된 행 (60일치 데이터가 아직 없는 신규 채널).
       COALESCE(
         (
           SELECT ss_t.subscriber_count
-          FROM   subscriber_snapshots ss_t
+          FROM   milestones ss_t
           WHERE  ss_t.channel_id = c.id
-            AND  s.polled_at IS NOT NULL
-            AND  julianday(s.polled_at) - julianday(ss_t.polled_at) >= 30.0
+            AND  s.recorded_at IS NOT NULL
+            AND  julianday(s.recorded_at) - julianday(ss_t.recorded_at) >= 30.0
             AND  ss_t.subscriber_count != s.subscriber_count
-          ORDER  BY ss_t.polled_at DESC
+          ORDER  BY ss_t.recorded_at DESC
           LIMIT  1
         ),
         (
           SELECT ss_60.subscriber_count
-          FROM   subscriber_snapshots ss_60
+          FROM   milestones ss_60
           WHERE  ss_60.channel_id = c.id
-            AND  s.polled_at IS NOT NULL
-            AND  julianday(s.polled_at) - julianday(ss_60.polled_at) >= 60.0
-          ORDER  BY ss_60.polled_at DESC
+            AND  s.recorded_at IS NOT NULL
+            AND  julianday(s.recorded_at) - julianday(ss_60.recorded_at) >= 60.0
+          ORDER  BY ss_60.recorded_at DESC
           LIMIT  1
         ),
         (
           SELECT ss_old.subscriber_count
-          FROM   subscriber_snapshots ss_old
+          FROM   milestones ss_old
           WHERE  ss_old.channel_id = c.id
-            AND  s.polled_at IS NOT NULL
-            AND  ss_old.polled_at < s.polled_at
-          ORDER  BY ss_old.polled_at ASC
+            AND  s.recorded_at IS NOT NULL
+            AND  ss_old.recorded_at < s.recorded_at
+          ORDER  BY ss_old.recorded_at ASC
           LIMIT  1
         )
       ) AS trend_baseline_count,
       COALESCE(
         (
-          SELECT ss_t.polled_at
-          FROM   subscriber_snapshots ss_t
+          SELECT ss_t.recorded_at
+          FROM   milestones ss_t
           WHERE  ss_t.channel_id = c.id
-            AND  s.polled_at IS NOT NULL
-            AND  julianday(s.polled_at) - julianday(ss_t.polled_at) >= 30.0
+            AND  s.recorded_at IS NOT NULL
+            AND  julianday(s.recorded_at) - julianday(ss_t.recorded_at) >= 30.0
             AND  ss_t.subscriber_count != s.subscriber_count
-          ORDER  BY ss_t.polled_at DESC
+          ORDER  BY ss_t.recorded_at DESC
           LIMIT  1
         ),
         (
-          SELECT ss_60.polled_at
-          FROM   subscriber_snapshots ss_60
+          SELECT ss_60.recorded_at
+          FROM   milestones ss_60
           WHERE  ss_60.channel_id = c.id
-            AND  s.polled_at IS NOT NULL
-            AND  julianday(s.polled_at) - julianday(ss_60.polled_at) >= 60.0
-          ORDER  BY ss_60.polled_at DESC
+            AND  s.recorded_at IS NOT NULL
+            AND  julianday(s.recorded_at) - julianday(ss_60.recorded_at) >= 60.0
+          ORDER  BY ss_60.recorded_at DESC
           LIMIT  1
         ),
         (
-          SELECT ss_old.polled_at
-          FROM   subscriber_snapshots ss_old
+          SELECT ss_old.recorded_at
+          FROM   milestones ss_old
           WHERE  ss_old.channel_id = c.id
-            AND  s.polled_at IS NOT NULL
-            AND  ss_old.polled_at < s.polled_at
-          ORDER  BY ss_old.polled_at ASC
+            AND  s.recorded_at IS NOT NULL
+            AND  ss_old.recorded_at < s.recorded_at
+          ORDER  BY ss_old.recorded_at ASC
           LIMIT  1
         )
       ) AS trend_baseline_at,
       (
         SELECT ss_24h.subscriber_count
-        FROM   subscriber_snapshots ss_24h
+        FROM   milestones ss_24h
         WHERE  ss_24h.channel_id = c.id
-          AND  s.polled_at IS NOT NULL
-          AND  julianday(s.polled_at) - julianday(ss_24h.polled_at) >= ?
-        ORDER  BY ss_24h.polled_at DESC
+          AND  s.recorded_at IS NOT NULL
+          AND  julianday(s.recorded_at) - julianday(ss_24h.recorded_at) >= ?
+        ORDER  BY ss_24h.recorded_at DESC
         LIMIT  1
       ) AS surge_baseline_count,
       s.video_count,
       s.view_count,
-      COALESCE(d.updated_at, s.polled_at) AS polled_at,
+      COALESCE(d.updated_at, s.recorded_at) AS polled_at,
       d.last_change_direction,
       d.last_changed_at
     FROM channels c
-    LEFT JOIN subscriber_snapshots s
+    LEFT JOIN milestones s
       ON  s.channel_id = c.id
-      AND s.polled_at  = (
-            SELECT MAX(ss.polled_at)
-            FROM   subscriber_snapshots ss
+      AND s.recorded_at = (
+            SELECT MAX(ss.recorded_at)
+            FROM   milestones ss
             WHERE  ss.channel_id = c.id
           )
     LEFT JOIN display_state d

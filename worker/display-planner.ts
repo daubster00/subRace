@@ -35,10 +35,10 @@ const SELECT_DISPLAY = `
 `;
 
 const SELECT_MILESTONES = `
-  SELECT polled_at, subscriber_count
-  FROM   subscriber_snapshots
+  SELECT recorded_at AS polled_at, subscriber_count
+  FROM   milestones
   WHERE  channel_id = ?
-  ORDER  BY polled_at DESC
+  ORDER  BY recorded_at DESC
   LIMIT  ?
 `;
 

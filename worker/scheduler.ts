@@ -38,7 +38,7 @@ function hasChannelsWithoutSnapshots(): boolean {
   ).get() as { n: number };
   if (activeChannels === 0) return false;
   const { n: snapshots } = db.prepare(
-    'SELECT COUNT(*) as n FROM subscriber_snapshots'
+    'SELECT COUNT(*) as n FROM milestones'
   ).get() as { n: number };
   return snapshots === 0;
 }

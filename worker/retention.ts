@@ -1,7 +1,7 @@
 import db from '@/lib/db';
 
-// 90일 이상 inactive 상태인 채널의 subscriber_snapshots + channels row를
-// 모두 삭제한다. subscriber_snapshots → channels 순서로 지워야 FK 의미상 안전.
+// 90일 이상 inactive 상태인 채널의 milestones + subscriber_snapshots + channels
+// row를 모두 삭제한다. (자식 → channels 순서로 지워야 FK 의미상 안전.)
 //
 // inactive_since 기록은 worker/yutura.ts의 sweep과 migrations/004에서 채워진다.
 // 활성 채널(is_active=1, inactive_since=NULL)은 절대 건드리지 않는다.
@@ -28,6 +28,9 @@ function runRetentionSweep(): void {
     const placeholders = ids.map(() => '?').join(',');
 
     const purge = db.transaction(() => {
+      db.prepare(
+        `DELETE FROM milestones WHERE channel_id IN (${placeholders})`,
+      ).run(...ids);
       db.prepare(
         `DELETE FROM subscriber_snapshots WHERE channel_id IN (${placeholders})`,
       ).run(...ids);
