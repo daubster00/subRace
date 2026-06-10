@@ -145,7 +145,9 @@ describe('planTargetCycle', () => {
       maxAbs = Math.max(maxAbs, Math.abs(pos));
     }
     expect(maxAbs).toBeLessThanOrEqual(300);
-    expect(plan.events.length).toBe(cfg.bounceCount); // 100
+    // CF-15: floor=latest 보호로 일부 음수 mag이 drop될 수 있음 — bounceCount 이하 허용.
+    expect(plan.events.length).toBeGreaterThan(0);
+    expect(plan.events.length).toBeLessThanOrEqual(cfg.bounceCount);
   });
 
   // 2026-06-10 새 정책: 하락 추세는 다음 감소 마일스톤을 예측하지 않는다.
