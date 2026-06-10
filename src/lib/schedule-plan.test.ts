@@ -130,22 +130,28 @@ describe('planTargetCycle', () => {
     expect(plan.events.some((e) => e.magnitude < 0)).toBe(true);
   });
 
-  it('target-bounce: 추세 0(정체) → 진폭 ±300 범위에서 ±10 jitter 랜덤 워크', () => {
+  // 2026-06-10 새 정책: 정체(추세 0)도 감소와 같은 모양 — [latest, latest+amp] 단방향.
+  // 누적 pos는 절대 음수가 되지 않는다 (display ≥ latest 보장).
+  it('target-bounce: 추세 0(정체) → [latest, latest+amp] 단방향 진동 (floor 아래 금지)', () => {
     const flat = Array(6).fill(5_000_000);
     const ms = milestones([0, 1, 2, 3, 4, 5], flat);
     const api = 5_000_000;
     const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(4));
     expect(plan.phase).toBe('target-bounce');
+    expect(plan.target).toBe(5_000_300); // latest + amp(=300)
     expect(plan.netDelta).toBe(0);
     for (const e of plan.events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(10);
     let pos = 0;
-    let maxAbs = 0;
+    let minPos = 0;
+    let maxPos = 0;
     for (const e of plan.events) {
       pos += e.magnitude;
-      maxAbs = Math.max(maxAbs, Math.abs(pos));
+      minPos = Math.min(minPos, pos);
+      maxPos = Math.max(maxPos, pos);
     }
-    expect(maxAbs).toBeLessThanOrEqual(300);
-    // CF-15: floor=latest 보호로 일부 음수 mag이 drop될 수 있음 — bounceCount 이하 허용.
+    expect(minPos).toBeGreaterThanOrEqual(0);
+    expect(maxPos).toBeLessThanOrEqual(300);
+    // 단방향 bounce는 일부 mag이 0으로 drop될 수 있음 — bounceCount 이하 허용.
     expect(plan.events.length).toBeGreaterThan(0);
     expect(plan.events.length).toBeLessThanOrEqual(cfg.bounceCount);
   });

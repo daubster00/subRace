@@ -39,28 +39,6 @@ export interface CyclePlan {
   events: ScheduledEvent[]; // fixed는 빈 배열
 }
 
-// display가 latest(마지막 마일스톤) 아래로 못 내려가게 events 배열을 시간순으로
-// sweep하여 음수 mag을 clamp. 위반하면 그 mag을 (floor − pos)로 줄이고, 0이 되면
-// 이벤트를 드롭. 모든 trendSign 케이스에 일관 적용되는 안전망(2026-06-10 CF-15).
-function clampEventsToFloor(
-  events: ScheduledEvent[],
-  startDisplay: number,
-  floor: number,
-): ScheduledEvent[] {
-  let pos = startDisplay;
-  const out: ScheduledEvent[] = [];
-  for (const e of events) {
-    let mag = e.magnitude;
-    if (pos + mag < floor) {
-      mag = floor - pos;
-      if (mag < 0) mag = 0;
-    }
-    pos += mag;
-    if (mag !== 0) out.push({ offsetMs: e.offsetMs, magnitude: mag });
-  }
-  return out;
-}
-
 // catch-up 플랜 — YouTube API가 새 마일스톤으로 점프했을 때 호출자(channel-
 // scheduler)가 발동. 현재 화면 display값에서 새 api까지 catchUpIntervalMs(=5초)
 // 고정 간격, 이벤트당 최대 ±maxMagnitude(=40)로 단방향 진행.
@@ -122,11 +100,12 @@ export function planTargetCycle(
     epsilon: cfg.trendEpsilon,
   })!;
 
-  // 감소 채널 정책(2026-06-10): 다음 감소 마일스톤을 예측하지 않는다. target은
+  // 감소·정체 채널 정책(2026-06-10): 다음 마일스톤을 예측하지 않는다. target은
   // 마지막 마일스톤(latest) + amplitude(bucket unit × bounceStepRatio)로 고정,
   // 진동 범위는 [latest, latest+amp] 단방향 — display는 latest 아래로 못 내려간다.
   // display가 그 범위 밖이면 normal phase로 진입하되 effectiveTarget로 향한다.
-  if (targetInfo.trendSign === -1) {
+  // trendSign=0(정체)도 같은 모양으로 처리해 양방향 진동이 floor를 깨던 문제 차단.
+  if (targetInfo.trendSign !== 1) {
     const bucketUnit = getApiBucket(api).unit;
     const amplitude = Math.max(1, Math.round(cfg.bounceStepRatio * bucketUnit));
     const floor = targetInfo.latest;
@@ -134,7 +113,7 @@ export function planTargetCycle(
     const offset = display - floor;
 
     if (offset >= 0 && offset <= amplitude) {
-      const rawEvents = buildBounceEvents({
+      const events = buildBounceEvents({
         amplitude,
         count: cfg.bounceCount,
         cycleMs: cfg.cycleMs,
@@ -144,19 +123,17 @@ export function planTargetCycle(
         negCap: 0,
         startPos: offset,
       });
-      const events = clampEventsToFloor(rawEvents, display, floor);
       return { phase: 'target-bounce', display, target: effectiveTarget, netDelta: 0, events };
     }
 
     const full = effectiveTarget - display;
-    const rawEvents = buildCycleEvents({
+    const events = buildCycleEvents({
       netDelta: full,
       cycleMs: cfg.cycleMs,
       maxMagnitude: cfg.normalMaxMagnitude,
       jitterRatio: cfg.jitterRatio,
       rng,
     });
-    const events = clampEventsToFloor(rawEvents, display, floor);
     const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
     return { phase: 'normal', display, target: effectiveTarget, netDelta: actualNetDelta, events };
   }
@@ -170,7 +147,8 @@ export function planTargetCycle(
 
   const full = target - display;
   let netDelta = 0;
-  if (predictedHours && targetInfo.trendSign !== 0 && full !== 0) {
+  // 위 분기에서 trendSign !== 1을 모두 잡아냈으므로 여기 도달 시 trendSign === 1.
+  if (predictedHours && full !== 0) {
     const raw = full * (cycleHours / predictedHours);
     // target 추월 금지: 한 사이클 이동량이 남은 거리를 넘으면 남은 거리로 클램프.
     netDelta = Math.abs(raw) >= Math.abs(full) ? full : Math.round(raw);
@@ -179,28 +157,25 @@ export function planTargetCycle(
   if (netDelta === 0) {
     // target-bounce: ±bounceStepRatio × bucket unit 진동, net ≈ 0.
     const amplitude = Math.max(1, Math.round(cfg.bounceStepRatio * getApiBucket(api).unit));
-    const rawEvents = buildBounceEvents({
+    const events = buildBounceEvents({
       amplitude,
       count: cfg.bounceCount,
       cycleMs: cfg.cycleMs,
       jitterRatio: cfg.jitterRatio,
       rng,
     });
-    const events = clampEventsToFloor(rawEvents, display, targetInfo.latest);
     return { phase: 'target-bounce', display, target, netDelta: 0, events };
   }
 
-  const rawEvents = buildCycleEvents({
+  const events = buildCycleEvents({
     netDelta,
     cycleMs: cfg.cycleMs,
     maxMagnitude: cfg.normalMaxMagnitude,
     jitterRatio: cfg.jitterRatio,
     rng,
   });
-  // buildCycleEvents의 적응 분배는 P-Q 정수 보정으로 ±1 오차 가능. CF-15(2026-06-10):
-  // events에 floor=latest 보호를 sweep 적용해 display가 마일스톤 아래로 못 내려가게
-  // 한다. 실제 적용분은 이벤트 합과 일치 — display_state.today_delta가 진짜 적용분.
-  const events = clampEventsToFloor(rawEvents, display, targetInfo.latest);
+  // buildCycleEvents의 적응 분배는 P-Q 정수 보정으로 ±1 오차 가능. 실제 적용분은
+  // 이벤트 합과 일치 — display_state.today_delta가 진짜 적용분을 가리키게 한다.
   const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
   return { phase: 'normal', display, target, netDelta: actualNetDelta, events };
 }
