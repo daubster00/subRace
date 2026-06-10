@@ -25,6 +25,8 @@ export interface PlanConfig {
   paceMaxIntervals: number;        // predictedHours 가중평균에 사용할 최근 간격 수
   jitterRatio: number;             // 시각 jitter 비율 (0~1)
   bounceCount: number;             // target-bounce phase 이벤트 개수 (보통 N_MAX_RANGE 근처)
+  trendMaxIntervals: number;       // trendSign 가중합에 사용할 최근 transition 최대 수
+  trendEpsilon: number;            // |가중합| ≤ ε이면 trendSign=0 (정체)으로 흡수
 }
 
 export type Phase = 'fixed' | 'catch-up' | 'normal' | 'target-bounce';
@@ -93,7 +95,10 @@ export function planTargetCycle(
 
   const display = storedDisplay ?? api;
   const cycleHours = cfg.cycleMs / 3_600_000;
-  const targetInfo = computeMilestoneTarget(milestones, cfg.targetRatio)!;
+  const targetInfo = computeMilestoneTarget(milestones, cfg.targetRatio, {
+    maxIntervals: cfg.trendMaxIntervals,
+    epsilon: cfg.trendEpsilon,
+  })!;
   const target = targetInfo.target;
 
   const predictedHours = computePredictedHoursToNextMilestone(milestones, {

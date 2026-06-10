@@ -17,16 +17,23 @@ export interface MilestoneRow {
 }
 
 // 규칙 4 — target 산출.
-//   가장 최근 마일스톤(latest)과 그와 값이 다른 직전 마일스톤(prev)의 부호로
-//   추세 방향을 정하고, 다음 예측 마일스톤의 ratio(=0.95) 지점을 target으로 둔다.
+//   가장 최근 마일스톤(latest)과 trendSign 방향에 맞는 prev를 골라 다음 예측
+//   마일스톤의 ratio(=0.95) 지점을 target으로 둔다.
 //
 //   target = latest + ratio × (latest − prev)
 //   예) 5,680k → 5,690k, ratio 0.95 → 5,690,000 + 0.95×10,000 = 5,699,500
 //   하락 예) 626k → 625k → 625,000 + 0.95×(−1,000) = 624,050
 //
-// latest와 값이 다른 prev를 뒤에서부터 찾는다. (009 이후 같은 값 재진입 마일스톤이
-// 연속으로 들어올 수 있어 단순히 rows[n-2]를 쓰면 trend가 0으로 뭉개진다.)
-// 값이 모두 같으면(진동 없는 단조 정체) trendSign 0, target = latest.
+// trendSign — 인접 마일스톤 transition 부호의 선형 가중합.
+//   직전 두 마일스톤만 비교하면 1만 단위 경계에서 한 번 튀었다 돌아온 채널이
+//   "방금 떨어진 채널"로 분류돼 SubRace 표시값이 다음 하락 마일스톤까지
+//   끌려내려가는 문제(2026-06-10 고객 클레임) 발생. 최근 N개(기본 12) transition의
+//   부호에 선형 weight(최신=큰 값)를 곱해 합산한 정규화 값으로 방향을 판단하고,
+//   |weighted| ≤ epsilon은 정체(0)로 흡수.
+//
+// prev 선택은 trendSign 방향에 맞춘다 (상승 판정이면 latest보다 작은 값 중
+// 가장 최근, 하락이면 큰 값 중 가장 최근). 방향에 맞는 값이 없거나 trendSign=0
+// 이면 prev=latest → stepDelta=0 → target=latest (평탄).
 export interface MilestoneTarget {
   target: number;
   trendSign: -1 | 0 | 1;
@@ -34,23 +41,56 @@ export interface MilestoneTarget {
   prev: number;
 }
 
+export interface MilestoneTargetOptions {
+  maxIntervals?: number;
+  epsilon?: number;
+}
+
 export function computeMilestoneTarget(
   rows: MilestoneRow[],
   ratio: number,
+  opts: MilestoneTargetOptions = {},
 ): MilestoneTarget | null {
   if (rows.length === 0) return null;
   const latest = rows[rows.length - 1]!.subscriber_count;
 
+  const maxIntervals = Math.max(1, opts.maxIntervals ?? 12);
+  const epsilon = opts.epsilon ?? 0.5;
+
+  // 인접 transition 부호 수집 (+1/0/-1). 최신 부호가 배열 끝.
+  const allSigns: number[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    allSigns.push(Math.sign(rows[i]!.subscriber_count - rows[i - 1]!.subscriber_count));
+  }
+  const signs = allSigns.slice(-maxIntervals);
+
+  // 가중합 정규화: 최신=큰 weight. weighted ∈ [-1, +1].
+  let weightedSum = 0;
+  let weightTotal = 0;
+  for (let i = 0; i < signs.length; i++) {
+    const weight = i + 1;
+    weightedSum += signs[i]! * weight;
+    weightTotal += weight;
+  }
+  const weighted = weightTotal > 0 ? weightedSum / weightTotal : 0;
+
+  let trendSign: -1 | 0 | 1;
+  if (weighted > epsilon) trendSign = 1;
+  else if (weighted < -epsilon) trendSign = -1;
+  else trendSign = 0;
+
+  // prev: trendSign 방향에 맞는 가장 최근의 다른 값. 없거나 trendSign=0이면
+  // prev=latest로 두어 target=latest (평탄).
   let prev = latest;
-  for (let i = rows.length - 2; i >= 0; i--) {
-    if (rows[i]!.subscriber_count !== latest) {
-      prev = rows[i]!.subscriber_count;
-      break;
+  if (trendSign !== 0) {
+    for (let i = rows.length - 2; i >= 0; i--) {
+      const v = rows[i]!.subscriber_count;
+      if (trendSign === 1 && v < latest) { prev = v; break; }
+      if (trendSign === -1 && v > latest) { prev = v; break; }
     }
   }
 
   const stepDelta = latest - prev;
-  const trendSign = (Math.sign(stepDelta) as -1 | 0 | 1);
   const target = latest + Math.round(ratio * stepDelta);
   return { target, trendSign, latest, prev };
 }

@@ -70,6 +70,13 @@ const envSchema = z.object({
   SCHEDULE_TARGET_RATIO: z.coerce.number().min(0).max(2).default(0.95),
   SCHEDULE_BOUNCE_STEP_RATIO: z.coerce.number().min(0).max(1).default(0.01),
   SCHEDULE_PACE_MAX_INTERVALS: z.coerce.number().int().min(1).default(8),
+  // 추세 부호(trendSign) 판정에 사용할 최근 인접 transition 최대 수.
+  // 인접 마일스톤 부호(+1/0/-1)에 선형 weight를 줘 가중합. 클수록 큰 흐름을,
+  // 작을수록 최근 신호만 보는 셈. 기본 12 (MILESTONE_FETCH_LIMIT과 동일).
+  SCHEDULE_TREND_MAX_INTERVALS: z.coerce.number().int().min(2).max(50).default(12),
+  // |가중합| ≤ epsilon이면 trendSign=0(정체)으로 흡수. 한 점 튐
+  // (signs=[+,+,+,−] → weighted≈0.2)을 0.5 안쪽에서 평탄 처리하기 위함.
+  SCHEDULE_TREND_EPSILON: z.coerce.number().min(0).max(1).default(0.5),
   SCHEDULE_EVENT_JITTER_RATIO: z.coerce.number().min(0).max(1).default(0.5),
   // target-bounce phase에서 사용할 이벤트 개수. 적당히 자주 진동하도록 N_MAX_RANGE
   // 근처(=300)로 설정 (2026-06-09 CF-8).

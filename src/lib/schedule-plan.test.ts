@@ -39,6 +39,8 @@ const cfg: PlanConfig = {
   paceMaxIntervals: 8,
   jitterRatio: 0.5,
   bounceCount: 100,
+  trendMaxIntervals: 12,
+  trendEpsilon: 0.5,
 };
 
 const sum = (es: { magnitude: number }[]) => es.reduce((a, e) => a + e.magnitude, 0);

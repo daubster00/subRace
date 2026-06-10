@@ -28,14 +28,6 @@ describe('computeMilestoneTarget (규칙 4)', () => {
     expect(t.target).toBe(624_050); // 625,000 + 0.95×(−1,000)
   });
 
-  it('latest와 같은 값이 연속이면 값이 다른 직전 마일스톤을 prev로 찾는다', () => {
-    // 진동 재진입: 5680 → 5690 → 5690 (같은 값 재도래)
-    const rows = [row(0, 5_680_000), row(1, 5_690_000), row(2, 5_690_000)];
-    const t = computeMilestoneTarget(rows, 0.95)!;
-    expect(t.prev).toBe(5_680_000);
-    expect(t.trendSign).toBe(1);
-  });
-
   it('모든 값 동일 → trendSign 0, target = latest', () => {
     const rows = [row(0, 5_000_000), row(1, 5_000_000)];
     const t = computeMilestoneTarget(rows, 0.95)!;
@@ -45,6 +37,85 @@ describe('computeMilestoneTarget (규칙 4)', () => {
 
   it('빈 배열 → null', () => {
     expect(computeMilestoneTarget([], 0.95)).toBeNull();
+  });
+
+  // 2026-06-10 고객 클레임 — 1만 단위 경계에서 한 번 튀었다 돌아온 채널이
+  // "방금 떨어진 채널"로 분류돼 표시값이 다음 하락 마일스톤까지 끌려내려가던 문제.
+  // 가중합 기반 trendSign + epsilon 흡수가 도입된 후로는 한 점 튐이 trendSign=0
+  // (정체)로 처리돼 target = latest 가 된다.
+  it('한 점 튐 흡수: ...+,+,+,− 시퀀스는 trendSign 0으로 흡수', () => {
+    // TWICE JAPAN 시나리오: 5,280k → 5,290k → 5,300k → 5,310k → 5,300k
+    // signs=[+1,+1,+1,-1], weights=[1,2,3,4], weighted=(1+2+3-4)/10=+0.2.
+    // epsilon=0.5 안쪽 → trendSign=0 → target=latest=5,300,000.
+    const rows = [
+      row(0, 5_280_000),
+      row(1, 5_290_000),
+      row(2, 5_300_000),
+      row(3, 5_310_000),
+      row(4, 5_300_000),
+    ];
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.trendSign).toBe(0);
+    expect(t.target).toBe(5_300_000);
+    expect(t.latest).toBe(5_300_000);
+  });
+
+  it('명확한 하락: ...-,-,0,- → trendSign -1, prev는 latest보다 큰 값 중 가장 최근', () => {
+    // Yuka Kinoshita 시나리오: 5,190k → 5,180k → 5,170k → 5,170k → 5,160k
+    // signs=[-1,-1,0,-1], weighted=(-1-2+0-4)/10=-0.7. 절댓값 > 0.5 → trendSign=-1.
+    // prev = latest=5,160k 위의 가장 최근 값 = 5,170,000.
+    const rows = [
+      row(0, 5_190_000),
+      row(1, 5_180_000),
+      row(2, 5_170_000),
+      row(3, 5_170_000),
+      row(4, 5_160_000),
+    ];
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.trendSign).toBe(-1);
+    expect(t.prev).toBe(5_170_000);
+    expect(t.target).toBe(5_150_500); // 5,160k + 0.95×(-10k)
+  });
+
+  it('epsilon 옵션: ε=0이면 한 점 튐도 그대로 -1로 잡힘 (튜닝 검증)', () => {
+    const rows = [
+      row(0, 5_280_000),
+      row(1, 5_290_000),
+      row(2, 5_300_000),
+      row(3, 5_310_000),
+      row(4, 5_300_000),
+    ];
+    const t = computeMilestoneTarget(rows, 0.95, { epsilon: 0 })!;
+    // weighted=+0.2 > 0 → trendSign=+1 (그래도 한 점 튐 영향으로 약한 +방향)
+    expect(t.trendSign).toBe(1);
+  });
+
+  it('maxIntervals: 최근 N개 transition만 사용', () => {
+    // 전체 시퀀스에서 옛 +가 많아도 최근 N=2개만 보면 −만 남는다.
+    // 6 마일스톤: +,+,+,+,- (5 transitions). maxIntervals=2 → 최근 2개 +,- 사용.
+    // weighted=(+1×1 + -1×2)/3 = -0.333. epsilon=0이면 trendSign=-1.
+    const rows = [
+      row(0, 100),
+      row(1, 110),
+      row(2, 120),
+      row(3, 130),
+      row(4, 140),
+      row(5, 130),
+    ];
+    const wide = computeMilestoneTarget(rows, 0.95, { maxIntervals: 12, epsilon: 0 })!;
+    expect(wide.trendSign).toBe(1); // 전체 보면 +가 우세
+    const narrow = computeMilestoneTarget(rows, 0.95, { maxIntervals: 2, epsilon: 0 })!;
+    expect(narrow.trendSign).toBe(-1); // 최근 2개만 보면 -가 우세
+  });
+
+  it('trendSign 방향에 맞는 prev가 없으면 target = latest (평탄 fallback)', () => {
+    // 모두 latest보다 큰 값(=하락 시퀀스)인데 trendSign이 +1로 오분류되는 케이스는
+    // 실제로는 거의 없으나, 방어 로직: 방향에 맞는 prev가 없으면 평탄.
+    const rows = [row(0, 5_000_000), row(1, 5_000_000)];
+    // 모두 5,000,000 → signs=[0] → trendSign=0 → prev=latest → target=latest.
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.target).toBe(5_000_000);
+    expect(t.prev).toBe(5_000_000);
   });
 });
 

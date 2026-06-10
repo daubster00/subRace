@@ -119,6 +119,8 @@ export function planOneChannel(
     paceMaxIntervals: env.SCHEDULE_PACE_MAX_INTERVALS,
     jitterRatio: env.SCHEDULE_EVENT_JITTER_RATIO,
     bounceCount: env.SCHEDULE_BOUNCE_COUNT,
+    trendMaxIntervals: env.SCHEDULE_TREND_MAX_INTERVALS,
+    trendEpsilon: env.SCHEDULE_TREND_EPSILON,
   };
 
   const api = poll.api_subscriber_count;
