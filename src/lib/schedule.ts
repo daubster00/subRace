@@ -24,7 +24,9 @@ const N_PHYS_MAX = 580;
 // absNet < SMALL_ABSNET_THRESHOLD면 [N_MIN_RANGE, N_MAX_RANGE] 사이 랜덤.
 // 2026-06-09 CF-11: N_MIN 175→100. N=100이면 슬롯 간격 36초 — 이벤트가
 // 덜 빈번하게 발생해 잔잔한 채널의 시각적 평온함을 더 강하게 보장.
-const SMALL_ABSNET_THRESHOLD = 1_160;
+// export: schedule-plan이 적응 분배 진입 영역 판단(=마일스톤 도달 catch-up
+// 트리거)에도 같은 임계를 쓰기 위함(2026-06-11 CF-17).
+export const SMALL_ABSNET_THRESHOLD = 1_160;
 const N_MIN_RANGE = 100;
 const N_MAX_RANGE = 300;
 

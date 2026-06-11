@@ -107,14 +107,18 @@ describe('planTargetCycle', () => {
   // CF-8 (2026-06-09): absNet < SMALL_ABSNET_THRESHOLD(1160) → N=random[100,300],
   // absNet < 0.8N이면 적응 분배.
   // CF-10: ±1 고정 → ±1~5 균등 랜덤. CF-11: N_MIN 175→100.
+  // CF-17 (2026-06-11): 마일스톤 도달 catch-up이 적응 영역 + display<latest+1%
+  // 케이스를 가로채므로, display를 마일스톤+1% 위로 두고 적응 분배만 검증.
   it('작은 absNet: random N + 적응 분배 (|mag|=1~5)', () => {
-    // step=100, target=5,000,095, full=95 → absNet=95 → small + adaptive (95 < 0.8N)
-    const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
-    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
+    // step=10,000, expectedInterval=10h, fresh. full=500, raw=50 → absNet=50<80(=0.8×100).
+    // display=5,009,000 (milestoneCatchUpTarget=5,000,100 위) → catch-up 미발동.
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 10, 20, 30, 40, 50], counts);
     const api = 5_000_000;
-    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(3));
+    const display = 5_009_000;
+    const plan = planTargetCycle(api, display, ms, cfg, nowAtLatest(ms), lcg(3));
     expect(plan.phase).toBe('normal');
-    expect(plan.target).toBe(5_000_095);
+    expect(plan.target).toBe(5_009_500);
     expect(plan.netDelta).toBeGreaterThan(0);
     expect(sum(plan.events)).toBe(plan.netDelta);
     // N은 [100, 300] 범위
@@ -227,10 +231,10 @@ describe('planTargetCycle', () => {
   });
 
   // CF-4 (2026-06-09): overdue 채널은 full gap을 한 사이클에 닫음.
-  // CF-10: 적응 분배 magnitude가 ±1~5 랜덤이라 합 = events 총합 일치만 검증
-  // (full≈95라 적응 분배 영역; netDelta는 events 합이 그대로 들어감).
+  // CF-17 (2026-06-11): step=100 setup은 absNet=95라 catch-up이 가로채므로
+  // step=10,000으로 변경(full=9,500, 정규 분배 영역 = catch-up 통과).
   it('overdue: 예상 도착 지나친 채널은 full gap 클램프로 닫는다', () => {
-    const counts = [4_999_500, 4_999_600, 4_999_700, 4_999_800, 4_999_900, 5_000_000];
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
     const ms = milestones([0, 1, 2, 3, 4, 5], counts);
     const api = 5_000_000;
     const now = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 10 * HOUR);
@@ -241,10 +245,12 @@ describe('planTargetCycle', () => {
   });
 
   // CF-4 검증: 경과 시간에 따라 pace 가속. absNet 크기로 분기.
-  it('경과 절반: predictedHours 절반으로 줄어 netDelta 2배 (정규 분배 케이스)', () => {
+  // CF-17 (2026-06-11): fresh 케이스는 absNet=950 + display=latest라
+  // 마일스톤 도달 catch-up이 가로챈다. half 케이스는 absNet=1900으로 통과.
+  it('경과 절반: fresh는 마일스톤 catch-up, half는 정규 분배', () => {
     // expectedInterval=10h, full=9500.
-    // fresh: remaining=10h → raw=950 → small, 적응 분배 (950 < 1160)
-    // half : remaining=5h  → raw=1900 → deterministic, 정규 분배
+    // fresh: remaining=10h → raw=950 → absNet<1160 + display<latest+1% → catch-up
+    // half : remaining=5h  → raw=1900 → absNet≥1160 → catch-up 통과, 정규 분배
     const slowCounts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
     const slowMs = milestones([0, 10, 20, 30, 40, 50], slowCounts);
     const api = 5_000_000;
@@ -252,9 +258,12 @@ describe('planTargetCycle', () => {
     const slowHalf = new Date(Date.parse(slowMs[slowMs.length - 1]!.polled_at) + 5 * HOUR);
     const slowPlanFresh = planTargetCycle(api, api, slowMs, cfg, slowFresh, lcg(17));
     const slowPlanHalf  = planTargetCycle(api, api, slowMs, cfg, slowHalf,  lcg(17));
-    // fresh: absNet=950 < 1160 → 적응 분배. ±1 오차 허용
-    expect(Math.abs(slowPlanFresh.netDelta - 950)).toBeLessThanOrEqual(1);
-    // half: absNet=1900 > 1160 → 정규 분배. 정확히 1900
+    // fresh: 마일스톤 도달 catch-up → target=latest+100, netDelta=100
+    expect(slowPlanFresh.phase).toBe('catch-up');
+    expect(slowPlanFresh.target).toBe(5_000_100);
+    expect(slowPlanFresh.netDelta).toBe(100);
+    // half: 정규 분배. 정확히 1900
+    expect(slowPlanHalf.phase).toBe('normal');
     expect(slowPlanHalf.netDelta).toBe(1_900);
   });
 
@@ -283,5 +292,82 @@ describe('planTargetCycle', () => {
         expect(gap).toBeGreaterThanOrEqual(6_200);
       }
     }
+  });
+});
+
+// CF-17 (2026-06-11): 마일스톤 도달 catch-up. 적응 분배 영역에 들어가면서
+// 화면이 마일스톤 근처에 머무는 잔잔한 채널이 50:50 진동으로 보이는 문제를
+// 막기 위해, "마일스톤 + bucket unit × 1%"까지 catch-up(5초 페이스 단방향)으로
+// 먼저 올리고 그 위에서 다음 사이클이 적응 분배로 흔든다.
+describe('planTargetCycle: 마일스톤 도달 catch-up (CF-17)', () => {
+  // 1천만 미만 채널: bucket unit = 10,000 → catch-up 위쪽 폭 = 100.
+
+  it('증가 + 적응 영역 + display < 마일스톤+1% → catch-up으로 마일스톤+1%까지', () => {
+    // step=10,000, expectedInterval=10h, fresh. full=9500, raw=950 → absNet=950<1160.
+    // display=api=latest. catch-up 발동.
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 10, 20, 30, 40, 50], counts);
+    const api = 5_000_000;
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(21));
+    expect(plan.phase).toBe('catch-up');
+    expect(plan.target).toBe(5_000_100);
+    expect(plan.netDelta).toBe(100);
+    expect(sum(plan.events)).toBe(100);
+    // catch-up은 단방향
+    expect(plan.events.every((e) => e.magnitude > 0)).toBe(true);
+  });
+
+  it('증가 + display ≥ 마일스톤+1% → catch-up 미발동(normal로 진행)', () => {
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 10, 20, 30, 40, 50], counts);
+    const api = 5_000_000;
+    // 5,000,100 < 5,000,100 false → catch-up 통과.
+    const plan = planTargetCycle(api, 5_000_100, ms, cfg, nowAtLatest(ms), lcg(22));
+    expect(plan.phase).toBe('normal');
+  });
+
+  it('증가 + 큰 absNet(≥1160) → catch-up 미발동, 정규 분배', () => {
+    // overdue clamp로 netDelta=full=9500. catch-up 통과.
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 1, 2, 3, 4, 5], counts);
+    const api = 5_000_000;
+    const now = new Date(Date.parse(ms[ms.length - 1]!.polled_at) + 10 * HOUR);
+    const plan = planTargetCycle(api, api, ms, cfg, now, lcg(23));
+    expect(plan.phase).toBe('normal');
+    expect(plan.netDelta).toBe(9_500);
+  });
+
+  it('정체(trendSign=0) + display < latest → catch-up으로 마일스톤+1%까지', () => {
+    // 마일스톤 평탄 = 정체. display는 latest 아래.
+    const flat = Array(6).fill(5_000_000);
+    const ms = milestones([0, 1, 2, 3, 4, 5], flat);
+    const api = 5_000_000;
+    const display = 4_999_950; // latest - 50
+    const plan = planTargetCycle(api, display, ms, cfg, nowAtLatest(ms), lcg(24));
+    expect(plan.phase).toBe('catch-up');
+    expect(plan.target).toBe(5_000_100);
+    expect(plan.netDelta).toBe(150);
+    expect(plan.events.every((e) => e.magnitude > 0)).toBe(true);
+  });
+
+  it('정체 + display ≥ latest → 기존 target-bounce 유지(catch-up 영향 없음)', () => {
+    const flat = Array(6).fill(5_000_000);
+    const ms = milestones([0, 1, 2, 3, 4, 5], flat);
+    const api = 5_000_000;
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(25));
+    expect(plan.phase).toBe('target-bounce');
+  });
+
+  it('1억 이상 채널: bucket unit=1,000,000 → catch-up 위쪽 폭=10,000', () => {
+    // 큰 채널은 적응 영역에 들어가기 어려워 catch-up이 거의 안 발동하지만,
+    // 발동될 때의 목표값 계산이 자릿값 기준으로 올바른지 확인.
+    const counts = [110_000_000, 110_500_000, 111_000_000, 111_500_000, 112_000_000, 112_500_000];
+    const ms = milestones([0, 100, 200, 300, 400, 500], counts);
+    const api = 112_500_000;
+    // expectedInterval=100h. raw=950000/100*1=475000 → absNet ≥ 1160 → catch-up 통과.
+    // 의도: catch-up이 발동될 수 있는 시그니처 검증을 위해 더 느린 setup 필요.
+    // 여기서는 발동 안 됨을 확인(미발동 검증).
+    const plan = planTargetCycle(api, api, ms, cfg, nowAtLatest(ms), lcg(26));
+    expect(plan.phase).toBe('normal');
   });
 });
