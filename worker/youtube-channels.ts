@@ -192,7 +192,7 @@ export async function pollYoutubeChannels(): Promise<void> {
       });
       commitSuccess(items);
 
-      // 새 마일스톤 채널 즉시 재계획 (catch-up). 커밋 이후라 planOneChannel이
+      // 새 마일스톤 채널 즉시 재계획 ('cycle' 트리거). 커밋 이후라 planOneChannel이
       // 읽는 poll_state/마일스톤이 최신 상태.
       for (const id of milestoneChannelIds) onNewMilestone(id);
 

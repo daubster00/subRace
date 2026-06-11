@@ -38,7 +38,8 @@ function pushUpdate(update: ChannelUpdate): void {
 // 두 트리거:
 //   1) 사이클 만료: 이벤트 소진 또는 next_cycle_reset_at 도달 → 해당 채널 재계획.
 //   2) 새 마일스톤: youtube-channels가 새 구독자 수 기록 시 onNewMilestone 호출
-//      → 즉시 재계획(catch-up). planOneChannel이 미적용 이벤트 DELETE → 이중 실행 방지.
+//      → 즉시 'cycle' 재계획 (새 latest를 target에 즉시 반영).
+//      planOneChannel이 미적용 이벤트 DELETE → 이중 실행 방지.
 //
 // Node 단일 스레드 + better-sqlite3 동기 호출이라 타이머 콜백은 인터리브되지
 // 않는다. clearTimeout → 재계획 → 재무장이 한 콜백 안에서 원자적으로 처리된다.
@@ -181,13 +182,13 @@ function replanAndArm(channelId: string, trigger: PlanTrigger): void {
   armTimer(channelId);
 }
 
-// 2026-06-09 CF-9: catch-up 비활성화. youtube-channels가 새 마일스톤을 감지해
-// 이 함수를 호출해도 아무것도 하지 않는다. 새 latest는 다음 cycle 만료 시
-// planTargetCycle이 자연스럽게 흡수한다 — full = target_new − display가 커지면
-// predictedHours로 나뉘어 사이클당 적정 페이스로 따라가고, overdue로 빠지면
-// 1시간 안에 다 닫는다. catch-up(5s 간격 ±40)이 만들던 별도 점프를 제거.
-export function onNewMilestone(_channelId: string): void {
-  // no-op
+// 2026-06-11: 사이클 중간에 새 마일스톤이 들어와도 target은 사이클 시작 시점의
+// latest 기준으로 묶여 다음 만료까지(최대 1시간) 'target < new latest' 상태가
+// 지속되는 문제 발견. CF-9가 끈 건 catch-up 점프(5s 간격 ±40)고, 여기선 'cycle'
+// 트리거로 target 사이클만 다시 짜 새 latest 기준의 천장/페이스로 정렬한다.
+// catch-up phase는 여전히 startup에서만 도달 가능.
+export function onNewMilestone(channelId: string): void {
+  replanAndArm(channelId, 'cycle');
 }
 
 // 워커 시작 시: 기존 스케줄이 있으면(재시작 복구) 재무장, 없으면 새로 계획.
