@@ -163,8 +163,11 @@ describe('buildCycleEvents (CF-8 신규 알고리즘)', () => {
 
 describe('buildCatchUpEvents', () => {
   const base = { intervalMs: 3_000, maxMagnitude: 40 };
+  // CF-18 (2026-06-11): 4 연속 → +8초 추가 휴식, 10 연속 → 단일 역방향(|mag|=1~5).
+  const PAUSE_EXTRA_MS = 8_000;
+  const COUNTER_RUN = 10;
 
-  it('Σ magnitude === netDelta (감소분 추세가 흡수)', () => {
+  it('Σ magnitude === netDelta (역방향만큼 추세가 흡수)', () => {
     for (const net of [40, 50, 199, 1_000, 10_000, -75, -2_345]) {
       const rng = lcg(net + 1);
       const events = buildCatchUpEvents({ ...base, netDelta: net, rng });
@@ -172,8 +175,9 @@ describe('buildCatchUpEvents', () => {
     }
   });
 
-  it('작은 net (N<10): 단방향, 휴식·감소 없음, 순수 i×interval', () => {
-    for (const net of [40, 100, 200, 252, -150]) {
+  it('작은 net (T<4): 단방향, 휴식·역방향 없음, 순수 i×interval', () => {
+    // T=ceil(absNet/maxMag), maxMag=40. net=40 → T=1, net=120 → T=3.
+    for (const net of [40, 80, 120, -120]) {
       const rng = lcg(net + 333);
       const events = buildCatchUpEvents({ ...base, netDelta: net, rng });
       const dir = net > 0 ? 1 : -1;
@@ -182,42 +186,45 @@ describe('buildCatchUpEvents', () => {
     }
   });
 
-  it('|각 magnitude| ≤ maxMagnitude', () => {
+  it('|각 magnitude| ≤ maxMagnitude (역방향 포함)', () => {
     const rng = lcg(99);
     const events = buildCatchUpEvents({ ...base, netDelta: 12_345, rng });
     for (const e of events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(40);
   });
 
-  it('큰 net: 감소 슬롯 ≤ 5%, 각 -1 (또는 +1 하향 시)', () => {
+  it('큰 net 상승: 10번째마다 역방향 단일 이벤트, |mag|∈[1,5]', () => {
     const rng = lcg(444);
     const events = buildCatchUpEvents({ ...base, netDelta: 10_000, rng });
     const counter = events.filter((e) => e.magnitude < 0);
-    expect(counter.length / events.length).toBeLessThanOrEqual(0.05);
     expect(counter.length).toBeGreaterThan(0);
-    expect(counter.every((e) => e.magnitude === -1)).toBe(true);
+    expect(counter.every((e) => e.magnitude >= -5 && e.magnitude <= -1)).toBe(true);
+    // 추세 슬롯 T ≈ 250, 역방향 ≈ T/10 ≈ 25. 비율 약 9.5%.
+    expect(counter.length / events.length).toBeLessThan(0.15);
+    expect(counter.length / events.length).toBeGreaterThan(0.05);
   });
 
-  it('큰 net 하향: 감소 슬롯 magnitude는 +1', () => {
+  it('큰 net 하향: 역방향은 양수, |mag|∈[1,5]', () => {
     const rng = lcg(555);
     const events = buildCatchUpEvents({ ...base, netDelta: -10_000, rng });
     const counter = events.filter((e) => e.magnitude > 0);
     expect(counter.length).toBeGreaterThan(0);
-    expect(counter.every((e) => e.magnitude === 1)).toBe(true);
+    expect(counter.every((e) => e.magnitude >= 1 && e.magnitude <= 5)).toBe(true);
   });
 
-  it('휴식 슬롯 ≤ 10% (인접 간격 > 3s인 쌍 비율)', () => {
+  it('4 연속 추세 후 다음 슬롯까지 13초 (intervalMs=3000 + 8000)', () => {
     const rng = lcg(11);
     const events = buildCatchUpEvents({ ...base, netDelta: 5_000, rng });
-    let restCount = 0;
-    let maxGap = 0;
+    let pauseGaps = 0;
     for (let i = 1; i < events.length; i++) {
       const gap = events[i]!.offsetMs - events[i - 1]!.offsetMs;
+      // 최소 간격은 intervalMs, 최대는 intervalMs + PAUSE_EXTRA_MS.
       expect(gap).toBeGreaterThanOrEqual(3_000);
-      if (gap > 3_000) restCount++;
-      maxGap = Math.max(maxGap, gap);
+      expect(gap).toBeLessThanOrEqual(3_000 + PAUSE_EXTRA_MS);
+      if (gap > 3_000 + 100) pauseGaps++;
     }
-    expect(restCount / events.length).toBeLessThanOrEqual(0.10);
-    expect(maxGap).toBeLessThanOrEqual(3_000 + 2_000);
+    // 추세 250개 중 4 연속마다 휴식이지만 10번째에선 역방향이 우선이라 휴식이 생략됨.
+    // 따라서 휴식 ≈ T/4 − T/10 = T × 0.15 정도.
+    expect(pauseGaps).toBeGreaterThan(0);
   });
 
   it('netDelta=0 → 빈 스케줄', () => {
@@ -225,15 +232,37 @@ describe('buildCatchUpEvents', () => {
     expect(events).toHaveLength(0);
   });
 
-  it('큰 갭(50k): 합 일치, magnitude 다양', () => {
+  it('큰 갭(50k): 합 일치, 길이 합리적', () => {
     const rng = lcg(123);
     const events = buildCatchUpEvents({ ...base, netDelta: 50_000, rng });
     expect(events.reduce((a, e) => a + e.magnitude, 0)).toBe(50_000);
-    expect(events.length).toBeGreaterThanOrEqual(1_780);
-    expect(events.length).toBeLessThanOrEqual(1_950);
-    const trendMags = events.filter((e) => e.magnitude > 0).map((e) => e.magnitude);
-    const uniqueTrend = new Set(trendMags);
-    expect(uniqueTrend.size).toBeGreaterThan(5);
+    // 추세 T ≈ 50000/40 = 1250, 역방향 ≈ 125, 총 ≈ 1375. 큰 갭에선 평균이 maxMag에
+    // 닿아 거의 모두 40에 클램프 — 다양화는 buildCycleEvents가 담당, catch-up은
+    // 빠른 도달이 목적.
+    expect(events.length).toBeGreaterThan(1_300);
+    expect(events.length).toBeLessThan(1_800);
+  });
+
+  it('역방향 직후 카운터 리셋 (역방향 사이 추세 ≥ COUNTER_RUN-1 슬롯)', () => {
+    const rng = lcg(777);
+    const events = buildCatchUpEvents({ ...base, netDelta: 30_000, rng });
+    // 음수 이벤트 직전까지 박힌 양수 추세 슬롯이 정확히 10개씩 들어 있어야 함.
+    let runUp = 0;
+    let counterCount = 0;
+    let prevDirNegative = false;
+    for (const e of events) {
+      if (e.magnitude > 0) {
+        if (prevDirNegative) runUp = 1;
+        else runUp++;
+        prevDirNegative = false;
+      } else if (e.magnitude < 0) {
+        counterCount++;
+        expect(runUp).toBe(COUNTER_RUN);
+        runUp = 0;
+        prevDirNegative = true;
+      }
+    }
+    expect(counterCount).toBeGreaterThan(50);
   });
 });
 

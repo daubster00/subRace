@@ -69,11 +69,14 @@ describe('planCatchUp', () => {
     plan.events.forEach((e, i) => expect(e.offsetMs).toBe(i * 3_000));
   });
 
-  it('큰 갭: 사이클(1h)에 묶이지 않고 매그니튜드 다양', () => {
+  it('큰 갭: 사이클(1h)에 묶이지 않고 길이 합리적', () => {
+    // CF-18 (2026-06-11): catch-up이 4 연속 → 8초 휴식, 10 연속 → 단일 역방향(|mag|1~5)
+    // 으로 바뀌어 추세 슬롯 T가 ceil(absNet/maxMag) 기반으로 축소(옛 ceil(absNet/(maxMag×0.7))).
+    // 50k 갭의 maxMag=40에서 T ≈ 1250, 역방향 ≈ 125 → 총 1300~1500.
     const api = 5_000_000;
     const plan = planCatchUp(api, api - 50_000, cfg, lcg(7));
-    expect(plan.events.length).toBeGreaterThanOrEqual(1_780);
-    expect(plan.events.length).toBeLessThanOrEqual(1_950);
+    expect(plan.events.length).toBeGreaterThanOrEqual(1_300);
+    expect(plan.events.length).toBeLessThanOrEqual(1_800);
     expect(sum(plan.events)).toBe(50_000);
     const last = plan.events[plan.events.length - 1]!;
     expect(last.offsetMs).toBeGreaterThan(HOUR);

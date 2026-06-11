@@ -277,30 +277,6 @@ export function buildCycleEvents(opts: BuildCycleOpts): ScheduledEvent[] {
   return assignTimes(merged, cycleMs, jitterRatio, rng);
 }
 
-// trend 다수 + counter 소수를, counter가 균등 간격으로 박히도록 병합 (catch-up 전용).
-function interleave(trend: number[], counter: number[]): number[] {
-  const total = trend.length + counter.length;
-  if (counter.length === 0) return trend.slice();
-  const out: number[] = [];
-  let ti = 0;
-  let ci = 0;
-  const counterSlots = new Set<number>();
-  const gap = total / counter.length;
-  for (let c = 0; c < counter.length; c++) {
-    counterSlots.add(Math.min(total - 1, Math.floor(gap * c + gap / 2)));
-  }
-  for (let i = 0; i < total; i++) {
-    if (counterSlots.has(i) && ci < counter.length) {
-      out.push(counter[ci++]!);
-    } else if (ti < trend.length) {
-      out.push(trend[ti++]!);
-    } else if (ci < counter.length) {
-      out.push(counter[ci++]!);
-    }
-  }
-  return out;
-}
-
 export interface BuildCatchUpOpts {
   netDelta: number;       // 따라잡을 순변화 (부호 있음)
   intervalMs: number;     // 이벤트 사이 고정 간격 (기본 5000ms)
@@ -308,44 +284,32 @@ export interface BuildCatchUpOpts {
   rng?: () => number;
 }
 
-// catch-up 자연스러움 파라미터 (2026-06-08 customer feedback). 향후 env 승격 여지.
-//   REST_RATIO   : 휴식 슬롯 비율 상한 — 총 이벤트 수의 10% 이내.
-//   REST_MIN/MAX : 휴식 한 번당 0.5~2.0초.
-//   COUNTER_RATIO: 감소 슬롯 비율 상한 — 총 이벤트 수의 5% 이내.
-//   COUNTER_MAG  : 감소 슬롯 한 번당 1 (subscriber). "내려가는 것처럼만 보이게".
-const CATCHUP_REST_RATIO    = 0.10;
-const CATCHUP_REST_MIN_MS   = 500;
-const CATCHUP_REST_MAX_MS   = 2_000;
-const CATCHUP_COUNTER_RATIO = 0.05;
-const CATCHUP_COUNTER_MAG   = 1;
+// catch-up 자연스러움 파라미터 (2026-06-11 customer feedback, CF-18).
+//   PAUSE_AFTER_RUN : 같은 방향 연속 이벤트 N개 박은 직후 다음 슬롯까지 +EXTRA_MS
+//                     (intervalMs=5초 위에 8초 추가 → 13초 간격). PAUSE 카운터 리셋.
+//   COUNTER_AFTER_RUN: 같은 방향 연속 이벤트 N개 박은 직후 다음 슬롯에 단일 역방향
+//                      이벤트 (mag 절댓값=1~5 균등). 두 카운터 모두 리셋.
+//   PAUSE_RUN=4, COUNTER_RUN=10이라 LCM=20까지 동시 발동 없음 — 첫 충돌 시점엔
+//   역방향이 휴식 효과를 겸하므로 8초 쉼은 생략(역방향만 적용).
+const CATCHUP_PAUSE_AFTER_RUN  = 4;
+const CATCHUP_PAUSE_EXTRA_MS   = 8_000;
+const CATCHUP_COUNTER_AFTER_RUN = 10;
+const CATCHUP_COUNTER_MIN_MAG  = 1;
+const CATCHUP_COUNTER_MAX_MAG  = 5;
 
-// N개 슬롯 중 K개 균등 + jitter 픽 (인덱스 0 제외 — 첫 이벤트 앞 휴식 무의미).
-function pickEvenSlots(n: number, k: number, rng: () => number): Set<number> {
-  const out = new Set<number>();
-  if (k <= 0 || n <= 1) return out;
-  const span = n - 1;
-  const step = span / k;
-  for (let i = 0; i < k; i++) {
-    const center = 1 + step * i + step / 2;
-    const jitter = (rng() - 0.5) * step;
-    const idx = Math.round(center + jitter);
-    out.add(Math.max(1, Math.min(n - 1, idx)));
-  }
-  return out;
-}
-
-// catch-up 전용 빌더 (2026-06-08, 사용자 피드백).
-// 사이클(=1시간)에 묶이지 않는다. 기본 intervalMs(=5초) 고정 간격에 휴식/감소
-// 슬롯을 섞어 큰 갭 채널이 1초당 1회씩 쉬지 않고 올라가던 문제를 막는다.
+// catch-up 전용 빌더 (2026-06-11 CF-18 재설계).
+// 사이클(=1시간)에 묶이지 않는다. 기본 intervalMs(=5초) 고정 간격으로 추세 이벤트를
+// 박되, 같은 방향 연속 길이에 따라 두 가지 자연스러움 장치를 삽입.
 //
-// 구조:
-//   - 추세 슬롯 T = ceil((absNet + C) / maxMag), 합 = absNet + C
-//   - 감소 슬롯 C ≤ T × 5/95 (전체의 5% 이내), 각 ±1
-//   - 휴식 슬롯 R ≤ N × 10% (N=T+C), 각 슬롯 직전에 0.5~2초 추가 지연
-//   - Σ magnitude === netDelta (감소분 추세가 흡수)
+//   1) 4번 연속 박으면 → 다음 슬롯까지 +8초 추가 (5+8=13초 간격). PAUSE 카운터 리셋.
+//   2) 10번 연속 박으면 → 다음 슬롯에 단일 역방향 이벤트(|mag|=1~5 균등) 삽입.
+//      삽입 후 두 카운터 모두 리셋(역방향이 방향을 깨므로).
+//
+// 두 카운터 동시 발동 시점(20, 40, …번째)에는 역방향만 적용, 8초 쉼은 생략 — 역방향
+// 이벤트 자체가 시각적 휴식 역할.
+//
+//   - Σ magnitude === netDelta (역방향 절댓값만큼 추세 슬롯 총량을 늘려 흡수)
 //   - |각 magnitude| ≤ maxMagnitude
-//
-// 갭이 작은 채널(absNet ≤ maxMag×~19)은 C=0, R=0이라 순수 i×interval 페이스.
 export function buildCatchUpEvents(opts: BuildCatchUpOpts): ScheduledEvent[] {
   const rng = opts.rng ?? defaultRng;
   const absNet = Math.abs(opts.netDelta);
@@ -353,40 +317,59 @@ export function buildCatchUpEvents(opts: BuildCatchUpOpts): ScheduledEvent[] {
   const trendDir = opts.netDelta > 0 ? 1 : -1;
   const maxMag = opts.maxMagnitude;
 
-  // T, C 동시 결정. 평형: C = floor(T × r/(1-r)),
-  // T = max(추세_충족_최소, 다양화). 단조 증가 → 3회면 안정.
-  const cFactor = CATCHUP_COUNTER_RATIO / (1 - CATCHUP_COUNTER_RATIO);
-  let T = Math.max(1, Math.ceil(absNet / (maxMag * 0.7)));
-  let C = 0;
+  // 1) 추세 슬롯 수 T를 절댓값 합이 (absNet + 역방향 누적)을 만족하도록 결정.
+  //    역방향 1개당 평균 절댓값 = (MIN+MAX)/2 = 3. T가 늘면 역방향도 늘어 trendTotal
+  //    이 또 늘어남 → 2~3회 iteration으로 수렴.
+  const avgCounterMag = (CATCHUP_COUNTER_MIN_MAG + CATCHUP_COUNTER_MAX_MAG) / 2;
+  let T = Math.max(1, Math.ceil(absNet / maxMag));
+  let counterCount = 0;
   for (let i = 0; i < 3; i++) {
-    C = Math.floor(T * cFactor);
-    const trendTotal = absNet + C * CATCHUP_COUNTER_MAG;
-    T = Math.max(
-      Math.ceil(trendTotal / maxMag),
-      Math.ceil(trendTotal / (maxMag * 0.7)),
-    );
+    counterCount = Math.floor(T / CATCHUP_COUNTER_AFTER_RUN);
+    const estimatedTrendTotal = absNet + counterCount * avgCounterMag;
+    T = Math.max(1, Math.ceil(estimatedTrendTotal / maxMag));
   }
 
-  const trendTotal = absNet + C * CATCHUP_COUNTER_MAG;
-  const trendMags = shuffle(distributeRandom(trendTotal, T, maxMag, rng), rng)
-    .map((m) => trendDir * m);
-  const counterMags = Array<number>(C).fill(-trendDir * CATCHUP_COUNTER_MAG);
-  const merged = interleave(trendMags, counterMags);
-  const N = merged.length;
+  // 2) 역방향 magnitude 미리 결정 (1~5 균등). 절댓값 합 결정 → 추세 총량 확정.
+  const counterAbsMags: number[] = [];
+  let counterAbsSum = 0;
+  for (let i = 0; i < counterCount; i++) {
+    const x = CATCHUP_COUNTER_MIN_MAG +
+      Math.floor(rng() * (CATCHUP_COUNTER_MAX_MAG - CATCHUP_COUNTER_MIN_MAG + 1));
+    counterAbsMags.push(x);
+    counterAbsSum += x;
+  }
+  const trendTotal = absNet + counterAbsSum;
+  // 추세 슬롯이 trendTotal을 ≤ maxMag로 담아낼 수 있도록 T 보정 (counterCount는 위에서
+  // 평균 기준이라 실제 합이 살짝 흔들릴 수 있음).
+  if (T * maxMag < trendTotal) T = Math.ceil(trendTotal / maxMag);
 
-  const R = Math.floor(N * CATCHUP_REST_RATIO);
-  const restSlots = pickEvenSlots(N, R, rng);
-  const restSpan = CATCHUP_REST_MAX_MS - CATCHUP_REST_MIN_MS + 1;
+  const trendAbsMags = shuffle(distributeRandom(trendTotal, T, maxMag, rng), rng);
 
+  // 3) emit — 추세를 순서대로 박고, 4·10 카운터에 따라 쉼/역방향 삽입.
   const events: ScheduledEvent[] = [];
   let cursor = 0;
-  for (let i = 0; i < N; i++) {
-    if (restSlots.has(i)) {
-      cursor += CATCHUP_REST_MIN_MS + Math.floor(rng() * restSpan);
-    }
-    events.push({ offsetMs: cursor, magnitude: merged[i]! });
+  let runPause = 0;
+  let runCounter = 0;
+  let counterIdx = 0;
+  for (let i = 0; i < T; i++) {
+    events.push({ offsetMs: cursor, magnitude: trendDir * trendAbsMags[i]! });
     cursor += opts.intervalMs;
+    runPause++;
+    runCounter++;
+
+    if (runCounter >= CATCHUP_COUNTER_AFTER_RUN && counterIdx < counterAbsMags.length) {
+      // 역방향 단일 이벤트 (휴식 효과 겸함, 8초 쉼은 적용 안 함)
+      events.push({ offsetMs: cursor, magnitude: -trendDir * counterAbsMags[counterIdx++]! });
+      cursor += opts.intervalMs;
+      runPause = 0;
+      runCounter = 0;
+    } else if (runPause >= CATCHUP_PAUSE_AFTER_RUN) {
+      // 다음 슬롯까지 추가 휴식
+      cursor += CATCHUP_PAUSE_EXTRA_MS;
+      runPause = 0;
+    }
   }
+
   return events;
 }
 
