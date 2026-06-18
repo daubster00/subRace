@@ -162,30 +162,23 @@ describe('planTargetCycle', () => {
     expect(plan.events.length).toBeLessThanOrEqual(cfg.bounceCount);
   });
 
-  // 2026-06-10 새 정책: 정체/하락 + display가 latest+amp 한참 위에 있는 케이스.
-  // 끌어내리지 않고 그 자리에서 양방향 진동(단 latest 밑으로는 못 감).
-  it('target-bounce: 정체 + display ≫ latest+amp → 현재 자리 양방향 진동, latest floor 보호', () => {
+  // 2026-06-18 정정: 정체/하락 + display가 밴드(latest+amp) 한참 위에 떠 있으면
+  // 그 자리에서 진동하는 게 아니라 마일스톤+amp(=밴드 천장)으로 끌어내려야 한다.
+  // (옛 동작은 하락 시작 채널을 옛 높은 값에 묶던 버그.)
+  it('정체 + display ≫ latest+amp → normal로 마일스톤+amp까지 끌어내림', () => {
     const flat = Array(6).fill(5_000_000);
     const ms = milestones([0, 1, 2, 3, 4, 5], flat);
     const api = 5_000_000;
     const display = 5_005_000; // latest 위 +5,000 (amp=300의 16배)
+    const ceiling = 5_000_300; // latest + amp(=0.03×10,000)
     const plan = planTargetCycle(api, display, ms, cfg, nowAtLatest(ms), lcg(8));
-    expect(plan.phase).toBe('target-bounce');
-    expect(plan.target).toBe(display);
-    expect(plan.netDelta).toBe(0);
-    let pos = 0;
-    let minPos = 0;
-    let maxPos = 0;
-    for (const e of plan.events) {
-      pos += e.magnitude;
-      minPos = Math.min(minPos, pos);
-      maxPos = Math.max(maxPos, pos);
-    }
-    // pos 누적은 [-min(amp, offset), +amp] = [-300, +300]
-    expect(minPos).toBeGreaterThanOrEqual(-300);
-    expect(maxPos).toBeLessThanOrEqual(300);
-    // 절대 display - 5000 (=latest) 밑으로는 안 감 → minPos ≥ -5000은 자명히 만족
-    expect(display + minPos).toBeGreaterThanOrEqual(5_000_000);
+    expect(plan.phase).toBe('normal');
+    expect(plan.target).toBe(ceiling);
+    expect(plan.netDelta).toBeLessThan(0); // 아래로 이동
+    const total = plan.events.reduce((s, e) => s + e.magnitude, 0);
+    expect(total).toBe(plan.netDelta);
+    // 한 사이클 하강 후 display가 천장(±1) 근처까지 내려옴 (갭 4,700 < 사이클 용량).
+    expect(display + total).toBe(ceiling);
   });
 
   // 2026-06-10 새 정책: 하락 추세 + display=latest → 위쪽 단방향 진동.

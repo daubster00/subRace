@@ -9,6 +9,8 @@
 //   - 규칙 3: 다음 마일스톤까지 예상 도달 시간 = 최근 인접 간격의
 //            순서 기반 선형 가중 평균 (최신 간격에 높은 weight)
 
+import { getApiUnit } from './api-bucket';
+
 const MS_PER_HOUR = 3_600_000;
 
 export interface MilestoneRow {
@@ -17,12 +19,13 @@ export interface MilestoneRow {
 }
 
 // 규칙 4 — target 산출.
-//   가장 최근 마일스톤(latest)과 trendSign 방향에 맞는 prev를 골라 다음 예측
-//   마일스톤의 ratio(=0.95) 지점을 target으로 둔다.
+//   가장 최근 마일스톤(latest)과 trendSign 방향(상승/하락/정체)을 보고, 다음
+//   마일스톤(= latest에서 정확히 한 반올림 단위 위/아래)의 ratio(=0.95) 지점을
+//   target으로 둔다.
 //
-//   target = latest + ratio × (latest − prev)
-//   예) 5,680k → 5,690k, ratio 0.95 → 5,690,000 + 0.95×10,000 = 5,699,500
-//   하락 예) 626k → 625k → 625,000 + 0.95×(−1,000) = 624,050
+//   target = latest + ratio × (trendSign × unit)   ← 크기는 항상 한 단위 고정
+//   예) 55,100,000 상승, ratio 0.95 → 55,100,000 + 0.95×10,000 = 55,109,500
+//   하락 예) 626,000 하락 → 626,000 − 0.95×1,000 = 625,050
 //
 // trendSign — 인접 마일스톤 transition 부호의 선형 가중합.
 //   직전 두 마일스톤만 비교하면 1만 단위 경계에서 한 번 튀었다 돌아온 채널이
@@ -90,7 +93,16 @@ export function computeMilestoneTarget(
     }
   }
 
-  const stepDelta = latest - prev;
+  // 2026-06-18 고객 정정: 다음 마일스톤은 항상 정확히 "한 반올림 단위" 위/아래.
+  // 직전 기록 마일스톤까지의 실제 간격(latest − prev)을 크기로 쓰면, 마일스톤
+  // 기록에 공백이 생긴 채널(예: 3,670,000 다음 기록이 곧장 3,700,000)에서 간격이
+  // 여러 단위로 잡혀 목표가 한 칸 이상 부풀어 실제 API를 추월하던 버그(Nintendo).
+  // 이제 prev는 방향(부호) 판단에만 쓰고, 크기는 무조건 한 단위로 고정한다.
+  //   상승: target = latest + ratio × unit  (예: 55,100,000 → 55,109,500)
+  //   하락: target = latest − ratio × unit
+  //   정체(trendSign 0): stepDelta 0 → target = latest
+  const unit = getApiUnit(latest);
+  const stepDelta = trendSign * unit;
   const target = latest + Math.round(ratio * stepDelta);
   return { target, trendSign, latest, prev };
 }

@@ -12,7 +12,7 @@ function row(hoursAgoFromBase: number, count: number, base = Date.parse('2026-06
 }
 
 describe('computeMilestoneTarget (규칙 4)', () => {
-  it('상승: target = latest + 0.95×(latest−prev)', () => {
+  it('상승: target = latest + 0.95×unit (한 단위 고정)', () => {
     const rows = [row(0, 5_680_000), row(1, 5_690_000)];
     const t = computeMilestoneTarget(rows, 0.95)!;
     expect(t.latest).toBe(5_690_000);
@@ -21,11 +21,20 @@ describe('computeMilestoneTarget (규칙 4)', () => {
     expect(t.target).toBe(5_699_500); // 5,690,000 + 0.95×10,000
   });
 
-  it('하락: 음수 step → target 아래로', () => {
-    const rows = [row(0, 626_000), row(1, 625_000)];
+  // 2026-06-18: 마일스톤 기록 공백으로 prev가 한 단위보다 멀어도(여기선 3단위)
+  // target은 한 단위만 올라가야 함 — 다음 마일스톤 추월 방지(Nintendo 버그).
+  it('상승: prev가 여러 단위 아래여도 target은 한 단위만', () => {
+    const rows = [row(0, 5_660_000), row(1, 5_690_000)]; // 3단위(30,000) 점프
+    const t = computeMilestoneTarget(rows, 0.95)!;
+    expect(t.trendSign).toBe(1);
+    expect(t.target).toBe(5_699_500); // 5,690,000 + 0.95×10,000 (30,000 아님)
+  });
+
+  it('하락: 음수 step → target 한 단위 아래로', () => {
+    const rows = [row(0, 5_690_000), row(1, 5_680_000)];
     const t = computeMilestoneTarget(rows, 0.95)!;
     expect(t.trendSign).toBe(-1);
-    expect(t.target).toBe(624_050); // 625,000 + 0.95×(−1,000)
+    expect(t.target).toBe(5_670_500); // 5,680,000 − 0.95×10,000
   });
 
   it('모든 값 동일 → trendSign 0, target = latest', () => {

@@ -118,17 +118,36 @@ export function planTargetCycle(
   const milestoneAbove = Math.max(1, Math.round(bucketUnit * 0.01));
   const milestoneCatchUpTarget = targetInfo.latest + milestoneAbove;
 
-  // 감소·정체 채널 정책(2026-06-10): 다음 마일스톤을 예측하지 않는다.
-  //   - display ≥ latest: 현재 자리에서 ±amplitude 진동. 단 누적이 latest 밑으로는
-  //     못 가게 negCap 보호. display가 마일스톤보다 한참 위에 떠 있어도 끌어내리지
-  //     않고 거기서 잔잔히 머문다 — "대기하다가 다음 마일스톤이 올라오면 따라간다".
-  //   - display < latest: 정체(0)는 catch-up으로 milestoneCatchUpTarget까지 빠르게,
-  //     감소(-1)는 normal phase로 effectiveTarget(=latest+amp)까지 위로 이동.
-  // 양방향 진동이 floor를 깨던 문제 + 정체 채널을 강제 하락시키던 문제 동시 차단.
+  // 감소·정체 채널 정책: 화면값이 밴드 [마일스톤, 마일스톤+1%] 안에 머물게 한다.
+  // 다음 마일스톤을 멀리 예측하지 않고, 마일스톤 바로 위 1%에 붙어 있는 게 정상.
+  //   - display > 마일스톤+1%: normal phase로 마일스톤+1%까지 부드럽게 끌어내림.
+  //     (2026-06-18 고객 정정: 하락이 시작된 채널이 옛 높은 값에 묶여 있던 버그.
+  //      예전엔 "끌어내리지 않고 머문다"였으나, 하락 채널은 마일스톤이 위로 안
+  //      올라오므로 영영 안 따라잡혀 정정. 원래 설계 의도 = 1% 위까지 하락.)
+  //   - display ∈ [마일스톤, 마일스톤+1%]: 그 안에서 단방향 진동(아래로 못 감).
+  //   - display < 마일스톤: 정체(0)는 catch-up으로 마일스톤+1%까지 빠르게,
+  //     감소(-1)는 normal phase로 마일스톤+1%까지 위로 이동.
   if (targetInfo.trendSign !== 1) {
     const amplitude = Math.max(1, Math.round(cfg.bounceStepRatio * bucketUnit));
     const floor = targetInfo.latest;
+    const ceiling = floor + amplitude;
     const offset = display - floor;
+
+    // display가 밴드 위로 떠 있으면 → 마일스톤+1%로 끌어내림. buildCycleEvents가
+    // 사이클당 안전 상한(이벤트당 ≤30)으로 나눠 내리므로 한 번에 뚝 안 떨어지고,
+    // 갭이 크면(예: 상승하다 막 꺾인 채널) 다음 사이클에 이어서 내려간다.
+    if (display > ceiling) {
+      const full = ceiling - display; // 음수
+      const events = buildCycleEvents({
+        netDelta: full,
+        cycleMs: cfg.cycleMs,
+        maxMagnitude: cfg.normalMaxMagnitude,
+        jitterRatio: cfg.jitterRatio,
+        rng,
+      });
+      const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
+      return { phase: 'normal', display, target: ceiling, netDelta: actualNetDelta, events };
+    }
 
     if (offset >= 0) {
       // 누적 pos는 [-min(amp, offset), +amp] 범위 = display가 latest 밑으로 못 감.
@@ -147,13 +166,12 @@ export function planTargetCycle(
     }
 
     // display < latest. 정체(0)는 마일스톤+1%까지 catch-up으로 빠르게.
-    // 감소(-1)는 마일스톤 위쪽(=latest+amp)까지 1시간 분산(normal).
+    // 감소(-1)는 마일스톤 위쪽(=ceiling=마일스톤+1%)까지 1시간 분산(normal).
     if (targetInfo.trendSign === 0) {
       return planCatchUp(milestoneCatchUpTarget, display, cfg, rng);
     }
 
-    const effectiveTarget = floor + amplitude;
-    const full = effectiveTarget - display;
+    const full = ceiling - display;
     const events = buildCycleEvents({
       netDelta: full,
       cycleMs: cfg.cycleMs,
@@ -162,7 +180,7 @@ export function planTargetCycle(
       rng,
     });
     const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
-    return { phase: 'normal', display, target: effectiveTarget, netDelta: actualNetDelta, events };
+    return { phase: 'normal', display, target: ceiling, netDelta: actualNetDelta, events };
   }
 
   const target = targetInfo.target;
