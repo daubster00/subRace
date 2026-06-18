@@ -144,6 +144,20 @@ describe('planTargetCycle', () => {
     for (const e of plan.events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(20);
   });
 
+  // 2026-06-18: 상승 채널이 천장 위에 떠 있으면(이전 상태 잔재 등) 끌어내림.
+  it('상승 + display > 천장 → normal로 천장까지 끌어내림', () => {
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 10, 20, 30, 40, 50], counts);
+    const api = 5_000_000;
+    const ceiling = 5_009_900; // latest + 0.99×unit
+    const display = 5_018_000; // 천장보다 한참 위
+    const plan = planTargetCycle(api, display, ms, cfg, nowAtLatest(ms), lcg(31));
+    expect(plan.phase).toBe('normal');
+    expect(plan.target).toBe(ceiling);
+    expect(plan.netDelta).toBeLessThan(0); // 아래로
+    expect(display + sum(plan.events)).toBeLessThanOrEqual(display); // 내려감
+  });
+
   // 2026-06-10 새 정책: 정체(추세 0) — display ≥ latest면 현재 자리에서 진동.
   // display=latest인 경우 negCap=0이라 사실상 위쪽 단방향. floor=latest 보호.
   it('target-bounce: 추세 0(정체) + display=latest → 현재 자리 위로 진동 (floor 아래 금지)', () => {

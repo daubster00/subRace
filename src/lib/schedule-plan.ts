@@ -215,6 +215,21 @@ export function planTargetCycle(
   const floor = targetInfo.latest;
   const ceiling = floor + Math.round(cfg.targetRatio * bucketUnit); // 0.99 단위
 
+  // 화면값이 천장 위로 떠 있으면 → 천장으로 끌어내림(하락 분기와 대칭). 이전 상태
+  // 잔재나 천장 하향 변동(추세·마일스톤 변화)으로 위에 남은 경우를 분산 이동으로
+  // 정리한다. 주차 진동(±parkBounce)만으로는 너무 느려 여기서 먼저 내린다.
+  if (display > ceiling) {
+    const events = buildCycleEvents({
+      netDelta: ceiling - display, // 음수
+      cycleMs: cfg.cycleMs,
+      maxMagnitude: cfg.normalMaxMagnitude,
+      jitterRatio: cfg.jitterRatio,
+      rng,
+    });
+    const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
+    return { phase: 'normal', display, target: ceiling, netDelta: actualNetDelta, events };
+  }
+
   const predictedHours = computePredictedHoursToNextMilestone(milestones, {
     maxIntervals: cfg.paceMaxIntervals,
     now,
