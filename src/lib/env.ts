@@ -52,8 +52,12 @@ const envSchema = z.object({
   // - MAX_MAGNITUDE: 이벤트당 절대 상한 (한 번에 ±20 초과 금지, 항목 4).
   // - COUNTER_RATIO: 반대 방향 이벤트 비율 (정상 0.20, catch-up은 코드에서 0).
   // - CYCLE_HOURS: 채널별 롤링 사이클 길이.
-  // - TARGET_RATIO: target = 마일스톤 + ratio×(새−직전) (항목 12, 0.85→0.95).
-  // - BOUNCE_STEP_RATIO: target 도달 후 진동 폭 = ratio × bucket unit (±3%).
+  // - TARGET_RATIO: 상승 채널 천장(주차 지점) = 마일스톤 + ratio × 한 단위.
+  //   2026-06-18 감속곡선: 0.95→0.99. 화면값은 한 칸의 99%에 주차하고 다음
+  //   마일스톤(100%)은 절대 안 넘는다.
+  // - BASE_SPEED_RATIO: 상승 기본 이동 속도 = ratio × 예상속도 (고객 "0.9 수준").
+  // - PARK_BOUNCE_RATIO: 99% 주차 후 미세 진동 폭 = ratio × 한 단위 (0.2%).
+  // - BOUNCE_STEP_RATIO: 하락·정체 밴드 폭 = ratio × bucket unit (1%).
   // - PACE_MAX_INTERVALS: 예상 도달 시간 산출에 쓸 최근 인접 간격 최대 수.
   // - EVENT_JITTER_RATIO: 이벤트 시각 분산 비율.
   SCHEDULE_MIN_MILESTONES: z.coerce.number().int().min(2).default(3),
@@ -67,7 +71,11 @@ const envSchema = z.object({
   // 큰 absNet에서 동적으로 키울 수 있음 (N이 N_PHYS_MAX=580에 캡됐을 때만).
   SCHEDULE_NORMAL_MAX_MAGNITUDE: z.coerce.number().int().min(1).default(10),
   SCHEDULE_CYCLE_HOURS: z.coerce.number().min(0.1).default(1),
-  SCHEDULE_TARGET_RATIO: z.coerce.number().min(0).max(2).default(0.95),
+  SCHEDULE_TARGET_RATIO: z.coerce.number().min(0).max(2).default(0.99),
+  // 상승 기본 이동 속도 계수 (예상속도 대비). 고객 "0.9 수준으로 이동".
+  SCHEDULE_BASE_SPEED_RATIO: z.coerce.number().min(0).max(1).default(0.9),
+  // 99% 주차 후 미세 진동 폭 = ratio × 한 단위 (한 칸의 0.2%). 하락·정체 밴드(1%)와 별개.
+  SCHEDULE_PARK_BOUNCE_RATIO: z.coerce.number().min(0).max(1).default(0.002),
   SCHEDULE_BOUNCE_STEP_RATIO: z.coerce.number().min(0).max(1).default(0.01),
   SCHEDULE_PACE_MAX_INTERVALS: z.coerce.number().int().min(1).default(8),
   // 추세 부호(trendSign) 판정에 사용할 최근 인접 transition 최대 수.

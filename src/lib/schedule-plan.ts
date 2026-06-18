@@ -8,7 +8,6 @@ import {
   buildBounceEvents,
   buildCatchUpEvents,
   buildCycleEvents,
-  SMALL_ABSNET_THRESHOLD,
   type ScheduledEvent,
 } from './schedule';
 
@@ -21,8 +20,10 @@ export interface PlanConfig {
   catchUpIntervalMs: number;       // catch-up 이벤트 간격 (보통 5000)
   normalMaxMagnitude: number;      // normal/bounce phase 이벤트당 절대 상한 (보통 10)
   cycleMs: number;                 // 사이클 길이 (1시간)
-  targetRatio: number;             // target = latest + ratio×(latest−prev), 보통 0.95
-  bounceStepRatio: number;         // bounce 진동 진폭 = bucket unit × ratio
+  targetRatio: number;             // 상승 천장(주차) = latest + ratio×한 단위, 보통 0.99
+  baseSpeedRatio: number;          // 상승 기본 속도 = ratio × 예상속도, 보통 0.9
+  parkBounceRatio: number;         // 99% 주차 후 미세 진동 폭 = ratio × 한 단위, 보통 0.002
+  bounceStepRatio: number;         // 하락·정체 밴드 폭 = bucket unit × ratio (1%)
   paceMaxIntervals: number;        // predictedHours 가중평균에 사용할 최근 간격 수
   jitterRatio: number;             // 시각 jitter 비율 (0~1)
   bounceCount: number;             // target-bounce phase 이벤트 개수 (보통 N_MAX_RANGE 근처)
@@ -31,6 +32,28 @@ export interface PlanConfig {
 }
 
 export type Phase = 'fixed' | 'catch-up' | 'normal' | 'target-bounce';
+
+// 상승 감속 곡선 (2026-06-18 고객 요청). 한 칸 구간 [마일스톤 → 다음 마일스톤]
+// 안에서 화면값 위치 비율 p에 따라 기본 속도(예상속도×0.9)에 곱하는 배수.
+//   p < 0.90        → 1.0  (그대로 0.9배 속도)
+//   0.90 ≤ p < 0.93 → 0.5
+//   0.93 ≤ p < 0.97 → 0.25
+//   0.97 ≤ p < 0.99 → 0.1
+//   p ≥ 0.99        → 0    (주차 — target-bounce 미세 진동, 다음 마일스톤 추월 금지)
+// 배수 값은 출발안. 적용 후 화면 보고 튜닝(이 표만 고치면 됨).
+const DECEL_BANDS: ReadonlyArray<readonly [number, number]> = [
+  [0.99, 0],
+  [0.97, 0.1],
+  [0.93, 0.25],
+  [0.90, 0.5],
+];
+
+function decelFactor(p: number): number {
+  for (const [threshold, factor] of DECEL_BANDS) {
+    if (p >= threshold) return factor;
+  }
+  return 1;
+}
 
 export interface CyclePlan {
   phase: Phase;
@@ -183,41 +206,48 @@ export function planTargetCycle(
     return { phase: 'normal', display, target: ceiling, netDelta: actualNetDelta, events };
   }
 
-  const target = targetInfo.target;
+  // ── 상승 채널 (trendSign === 1) — 0.9배 속도 + 단계 감속 곡선 (2026-06-18) ──
+  // 한 칸 구간 [floor=마일스톤, ceiling=마일스톤+0.99단위] 안에서, 화면값 위치
+  // 비율 p에 따라 기본 속도(예상속도×baseSpeedRatio)에 감속 배수를 곱해 이동한다.
+  // p가 0.90을 넘으면 단계적으로 느려지고 0.99(=ceiling)에 주차해 다음 마일스톤을
+  // 절대 추월하지 않는다. 마일스톤이 API로 확정되면 floor가 한 칸 위로 점프하여
+  // 화면값이 새 칸으로 자연스럽게 이어 오른다(상승 catch-up 불필요).
+  const floor = targetInfo.latest;
+  const ceiling = floor + Math.round(cfg.targetRatio * bucketUnit); // 0.99 단위
 
   const predictedHours = computePredictedHoursToNextMilestone(milestones, {
     maxIntervals: cfg.paceMaxIntervals,
     now,
   });
 
-  const full = target - display;
   let netDelta = 0;
-  // 위 분기에서 trendSign !== 1을 모두 잡아냈으므로 여기 도달 시 trendSign === 1.
-  if (predictedHours && full !== 0) {
-    const raw = full * (cycleHours / predictedHours);
-    // target 추월 금지: 한 사이클 이동량이 남은 거리를 넘으면 남은 거리로 클램프.
-    netDelta = Math.abs(raw) >= Math.abs(full) ? full : Math.round(raw);
+  if (predictedHours && display < ceiling) {
+    const p = (display - floor) / bucketUnit; // 한 칸 안 위치 비율
+    // 기본 이동 = baseSpeedRatio × 예상속도 × 사이클시간
+    //   예상속도(=한 단위 / 예상 도달시간) × 사이클시간 = 단위 × (사이클시간/예상시간)
+    const baseMove = cfg.baseSpeedRatio * bucketUnit * (cycleHours / predictedHours);
+    netDelta = Math.round(baseMove * decelFactor(p));
+    // 천장 추월 금지: 이동 후 ceiling을 넘으면 남은 거리로 클램프.
+    if (display + netDelta > ceiling) netDelta = ceiling - display;
+    if (netDelta < 0) netDelta = 0;
   }
 
   if (netDelta === 0) {
-    // target-bounce: ±bounceStepRatio × bucket unit 진동, net ≈ 0.
-    const amplitude = Math.max(1, Math.round(cfg.bounceStepRatio * bucketUnit));
+    // 99% 주차 → 천장 바로 아래에서 미세 진동. posCap=천장까지 남은 여유(보통 0),
+    // negCap=parkBounce 폭 → 아래로만 흔들려 다음 마일스톤을 절대 안 넘는다.
+    const amplitude = Math.max(1, Math.round(cfg.parkBounceRatio * bucketUnit));
+    const posCap = Math.min(amplitude, Math.max(0, ceiling - display));
     const events = buildBounceEvents({
       amplitude,
       count: cfg.bounceCount,
       cycleMs: cfg.cycleMs,
       jitterRatio: cfg.jitterRatio,
       rng,
+      posCap,
+      negCap: amplitude,
+      startPos: 0,
     });
-    return { phase: 'target-bounce', display, target, netDelta: 0, events };
-  }
-
-  // 마일스톤 도달 catch-up(2026-06-11 CF-17): 이번 사이클이 적응 분배 영역
-  // (|netDelta| < SMALL_ABSNET_THRESHOLD)이고 화면이 아직 마일스톤+1% 미만이면,
-  // 1시간에 분산하지 않고 5초 페이스로 그 지점까지 끌어올린다. 마일스톤 직후의
-  // 시각 도달을 또렷이 보여주고, 그 위에서 다음 사이클이 적응 분배로 흔든다.
-  if (Math.abs(netDelta) < SMALL_ABSNET_THRESHOLD && display < milestoneCatchUpTarget) {
-    return planCatchUp(milestoneCatchUpTarget, display, cfg, rng);
+    return { phase: 'target-bounce', display, target: ceiling, netDelta: 0, events };
   }
 
   const events = buildCycleEvents({
@@ -227,8 +257,18 @@ export function planTargetCycle(
     jitterRatio: cfg.jitterRatio,
     rng,
   });
-  // buildCycleEvents의 적응 분배는 P-Q 정수 보정으로 ±1 오차 가능. 실제 적용분은
-  // 이벤트 합과 일치 — display_state.today_delta가 진짜 적용분을 가리키게 한다.
-  const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
-  return { phase: 'normal', display, target, netDelta: actualNetDelta, events };
+  // 천장 추월 하드 가드(상승 한정): buildCycleEvents의 적응 분배는 분산이 있어
+  // 작은 netDelta를 초과해 화면값을 천장 위로 밀 수 있다. 시간순 누적이 ceiling을
+  // 넘는 양수 이벤트를 그만큼 깎아 다음 마일스톤을 절대 못 넘게 한다.
+  let cum = display;
+  for (const e of events) {
+    if (e.magnitude > 0 && cum + e.magnitude > ceiling) {
+      e.magnitude = Math.max(0, ceiling - cum);
+    }
+    cum += e.magnitude;
+  }
+  const guarded = events.filter((e) => e.magnitude !== 0);
+  // 실제 적용분은 이벤트 합과 일치 — display_state.today_delta가 진짜 적용분을 가리킨다.
+  const actualNetDelta = guarded.reduce((s, e) => s + e.magnitude, 0);
+  return { phase: 'normal', display, target: ceiling, netDelta: actualNetDelta, events: guarded };
 }

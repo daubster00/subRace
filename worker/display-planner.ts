@@ -115,6 +115,8 @@ export function planOneChannel(
     cycleMs,
     catchUpIntervalMs: env.SCHEDULE_CATCHUP_INTERVAL_MS,
     targetRatio: env.SCHEDULE_TARGET_RATIO,
+    baseSpeedRatio: env.SCHEDULE_BASE_SPEED_RATIO,
+    parkBounceRatio: env.SCHEDULE_PARK_BOUNCE_RATIO,
     bounceStepRatio: env.SCHEDULE_BOUNCE_STEP_RATIO,
     paceMaxIntervals: env.SCHEDULE_PACE_MAX_INTERVALS,
     jitterRatio: env.SCHEDULE_EVENT_JITTER_RATIO,
