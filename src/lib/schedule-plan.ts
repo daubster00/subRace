@@ -211,7 +211,8 @@ export function planTargetCycle(
   // 비율 p에 따라 기본 속도(예상속도×baseSpeedRatio)에 감속 배수를 곱해 이동한다.
   // p가 0.90을 넘으면 단계적으로 느려지고 0.99(=ceiling)에 주차해 다음 마일스톤을
   // 절대 추월하지 않는다. 마일스톤이 API로 확정되면 floor가 한 칸 위로 점프하여
-  // 화면값이 새 칸으로 자연스럽게 이어 오른다(상승 catch-up 불필요).
+  // 화면값이 새 칸으로 자연스럽게 이어 오른다 — 단, display가 floor 아래로 처진
+  // 경우는 normal의 느린 속도로 못 메우므로 아래에서 catch-up으로 닫는다(2026-06-22).
   const floor = targetInfo.latest;
   const ceiling = floor + Math.round(cfg.targetRatio * bucketUnit); // 0.99 단위
 
@@ -228,6 +229,17 @@ export function planTargetCycle(
     });
     const actualNetDelta = events.reduce((s, e) => s + e.magnitude, 0);
     return { phase: 'normal', display, target: ceiling, netDelta: actualNetDelta, events };
+  }
+
+  // 상승 채널이 마일스톤(floor) 아래로 처졌으면 → catch-up으로 빠르게 floor+1%까지.
+  // (2026-06-22) 상승 채널은 onNewMilestone이 'cycle' 트리거라 normal의 느린
+  // 속도(0.9×예상속도)로만 따라간다. 마일스톤이 점프했는데 그 시점 display가 floor
+  // 한참 아래면 한 사이클에 갭을 못 닫아 'display < 최신 마일스톤'(FLOOR 위반)이
+  // 장시간 지속됐다. 정체(trendSign=0)·display<floor 분기와 동일하게 catch-up으로
+  // 닫는다(이벤트당 ≤40, 5초 간격). 닫은 뒤 다음 사이클부터 감속 곡선 normal이 이어받아
+  // floor+1%(p≈0.01) 지점에서 천장(0.99단위)을 향해 정상 속도로 오른다.
+  if (display < floor) {
+    return planCatchUp(milestoneCatchUpTarget, display, cfg, rng);
   }
 
   const predictedHours = computePredictedHoursToNextMilestone(milestones, {

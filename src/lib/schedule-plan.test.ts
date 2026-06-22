@@ -144,6 +144,24 @@ describe('planTargetCycle', () => {
     for (const e of plan.events) expect(Math.abs(e.magnitude)).toBeLessThanOrEqual(20);
   });
 
+  // 2026-06-22: 상승 채널이 마일스톤(floor) 아래로 처지면 → catch-up으로 빠르게
+  // 닫는다. 새 마일스톤 점프 후 display가 floor 한참 아래일 때 normal 느린 속도로는
+  // 못 메워 FLOOR 위반(display < 최신 마일스톤)이 지속되던 문제(구조적 catch-up 부재).
+  it('상승 + display < 마일스톤(floor) → catch-up으로 floor+1%까지 빠르게', () => {
+    const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
+    const ms = milestones([0, 10, 20, 30, 40, 50], counts);
+    const api = 5_000_000;          // latest milestone = floor
+    const display = 4_993_000;      // floor보다 7,000 아래 (마일스톤 점프 직후 처짐)
+    const plan = planTargetCycle(api, display, ms, cfg, nowAtLatest(ms), lcg(13));
+    expect(plan.phase).toBe('catch-up');
+    expect(plan.target).toBe(5_000_100); // floor + max(1, round(unit×0.01)) = 5,000,000 + 100
+    expect(plan.display).toBe(display);
+    expect(plan.netDelta).toBe(7_100);   // 단방향으로 floor+1%까지
+    expect(sum(plan.events)).toBe(7_100);
+    expect(plan.events.every((e) => e.magnitude <= 40)).toBe(true); // catch-up 상한
+    expect(display + sum(plan.events)).toBe(5_000_100); // 최신 마일스톤 위로 복귀
+  });
+
   // 2026-06-18: 상승 채널이 천장 위에 떠 있으면(이전 상태 잔재 등) 끌어내림.
   it('상승 + display > 천장 → normal로 천장까지 끌어내림', () => {
     const counts = [4_950_000, 4_960_000, 4_970_000, 4_980_000, 4_990_000, 5_000_000];
